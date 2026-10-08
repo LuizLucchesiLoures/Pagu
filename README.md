@@ -20,8 +20,8 @@ PAGU/
     └── FCL/           # gráficos produzidos ao executar o programa
 ```
 
-Os outros scripts e exemplos que estão na pasta de trabalho não fazem parte
-deste projeto; o `.gitignore` os mantém fora deste repositório.
+Outros scripts de estudo (exemplos do PyMC, dashboard etc.) não fazem parte
+deste projeto e ficam fora desta pasta.
 
 ## Preparar o ambiente
 

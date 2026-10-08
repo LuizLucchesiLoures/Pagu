@@ -159,17 +159,6 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Portfolio project: keep only its main program in this mixed working folder.
-/API_QuiklyStart.py
-/Coal_mining_disasters.py
-/ComparationModel_8scholl.py
-/Hearing_impaired_Children.py
-/LinearRegressionPilot.py
-/Pilot.py
-/cotacoes_yahoo.py
-/import yfinance as yf.py
-/stock_dashboard.py
-/requirements-app.txt
 /.vscode/
 
 # Version only the source datasets used by Portfolio.py.
