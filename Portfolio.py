@@ -35,7 +35,7 @@ TICKERS_YAHOO_ACOES = {
     "ITUB3.SA": ("ITUB3.SA", "ITUB4.SA"),
     "FESA4.SA": ("FESA3.SA", "FESA4.SA"),
     "EGIE3.SA": ("EGIE3.SA",),
-    "VALE5.SA": ("VALE3.SA",),
+    "VALE3.SA": ("VALE3.SA",),
 }
 
 
@@ -80,7 +80,7 @@ quantidades_acoes, tabela_quantidade_acoes = buscar_quantidade_acoes_yahoo(empre
 quantidade_acoes_itub3 = quantidades_acoes["ITUB3.SA"]
 quantidade_acoes_fesa4 = quantidades_acoes["FESA4.SA"]
 quantidade_acoes_egie3 = quantidades_acoes["EGIE3.SA"]
-quantidade_acoes_vale5 = quantidades_acoes["VALE3.SA"]
+quantidade_acoes_vale3 = quantidades_acoes["VALE3.SA"]
 
 arquivo_quantidade_acoes = OUTPUT_DIR / "quantidade_acoes_yahoo.csv"
 tabela_quantidade_acoes.to_csv(arquivo_quantidade_acoes, index=False)
@@ -942,6 +942,8 @@ if USAR_PAYOUT_BAYESIANO:
             .dropna()
             .to_numpy(dtype=float)
         )
+        # A log-normal exige payout estritamente positivo (anos sem proventos saem).
+        observacoes_payout = observacoes_payout[observacoes_payout > 0]
 
         if observacoes_payout.size < 2:
             payout_medio_por_empresa.loc[empresa] = np.nan
@@ -958,26 +960,30 @@ if USAR_PAYOUT_BAYESIANO:
                     "payout_p90_posterior_pct": np.nan,
                     "payout_p05_posterior_pct": np.nan,
                     "payout_p95_posterior_pct": np.nan,
+                    "payout_previsto_p10_pct": np.nan,
+                    "payout_previsto_p50_pct": np.nan,
+                    "payout_previsto_p90_pct": np.nan,
                 }
             )
             continue
 
-        escala_prior = max(float(np.std(observacoes_payout, ddof=1)), 0.01)
+        # O payout é uma razão positiva e assimétrica: usa-se um modelo
+        # log-normal, com prior fraca centrada em 50% (desvio de 1 em log).
         with pm.Model() as modelo_payout:
-            payout_medio = pm.Normal(
-                "payout_medio",
-                mu=float(np.mean(observacoes_payout)),
-                sigma=10 * escala_prior,
-            )
-            payout_sigma = pm.HalfNormal(
-                "payout_sigma",
-                sigma=escala_prior,
-            )
-            pm.Normal(
+            payout_mu_log = pm.Normal("payout_mu_log", mu=np.log(50.0), sigma=1.0)
+            payout_sigma_log = pm.HalfNormal("payout_sigma_log", sigma=1.0)
+            pm.LogNormal(
                 "payout_anual_observado",
-                mu=payout_medio,
-                sigma=payout_sigma,
+                mu=payout_mu_log,
+                sigma=payout_sigma_log,
                 observed=observacoes_payout,
+            )
+            # Mediana do payout anual: payout central usado nos resultados.
+            pm.Deterministic("payout_mediano", pt.exp(payout_mu_log))
+            # Média da log-normal: só informativa, é puxada para cima por sigma.
+            pm.Deterministic(
+                "payout_medio",
+                pt.exp(payout_mu_log + payout_sigma_log**2 / 2),
             )
             idata_payout = pm.sample(
                 draws=2000,
@@ -990,27 +996,41 @@ if USAR_PAYOUT_BAYESIANO:
                 progressbar=False,
             )
 
-        amostras_media_posterior = (
-            idata_payout.posterior["payout_medio"].values.flatten()
+        amostras_mediana_posterior = (
+            idata_payout.posterior["payout_mediano"].values.flatten()
         )
-        media_posterior = float(amostras_media_posterior.mean())
+        media_posterior = float(
+            idata_payout.posterior["payout_medio"].values.mean()
+        )
         payout_p10, payout_p50, payout_p90 = np.percentile(
-            amostras_media_posterior,
+            amostras_mediana_posterior,
             [10, 50, 90],
         )
         mediana_posterior = float(payout_p50)
+        # Payout de um ano futuro: inclui a variação anual (sigma), não só a
+        # incerteza sobre a média.
+        mu_log_amostras = idata_payout.posterior["payout_mu_log"].values.flatten()
+        sigma_log_amostras = idata_payout.posterior["payout_sigma_log"].values.flatten()
+        payout_previsto = np.exp(
+            np.random.default_rng(42 + indice_empresa).normal(
+                mu_log_amostras, sigma_log_amostras
+            )
+        )
+        previsto_p10, previsto_p50, previsto_p90 = np.percentile(
+            payout_previsto, [10, 50, 90]
+        )
         payout_p05, payout_p95 = np.percentile(
-            amostras_media_posterior,
+            amostras_mediana_posterior,
             [5, 95],
         )
-        payout_medio_por_empresa.loc[empresa] = media_posterior
+        payout_medio_por_empresa.loc[empresa] = mediana_posterior
 
         grade_payout = np.linspace(
-            np.percentile(amostras_media_posterior, 0.5),
-            np.percentile(amostras_media_posterior, 99.5),
+            np.percentile(amostras_mediana_posterior, 0.5),
+            np.percentile(amostras_mediana_posterior, 99.5),
             500,
         )
-        densidade_payout = gaussian_kde(amostras_media_posterior)(grade_payout)
+        densidade_payout = gaussian_kde(amostras_mediana_posterior)(grade_payout)
         eixo.plot(grade_payout, densidade_payout, color="teal", linewidth=2)
         eixo.fill_between(
             grade_payout,
@@ -1022,14 +1042,13 @@ if USAR_PAYOUT_BAYESIANO:
             label="Intervalo de credibilidade 90%",
         )
         eixo.axvline(
-            media_posterior,
+            mediana_posterior,
             color="black",
             linestyle="--",
-            label="Média posterior",
+            label="Mediana posterior",
         )
         for percentil, valor, cor in (
             ("P10", payout_p10, "#d55e00"),
-            ("P50", payout_p50, "#0072b2"),
             ("P90", payout_p90, "#009e73"),
         ):
             eixo.axvline(
@@ -1039,7 +1058,7 @@ if USAR_PAYOUT_BAYESIANO:
                 linewidth=1.8,
                 label=f"{percentil}: {valor:.2f}%",
             )
-        eixo.set_title(f"{empresa} - payout médio posterior")
+        eixo.set_title(f"{empresa} - payout mediano posterior")
         eixo.set_xlabel("Payout (%)")
         eixo.set_ylabel("Densidade posterior")
         eixo.legend()
@@ -1056,6 +1075,9 @@ if USAR_PAYOUT_BAYESIANO:
                 "payout_p90_posterior_pct": float(payout_p90),
                 "payout_p05_posterior_pct": float(payout_p05),
                 "payout_p95_posterior_pct": float(payout_p95),
+                "payout_previsto_p10_pct": float(previsto_p10),
+                "payout_previsto_p50_pct": float(previsto_p50),
+                "payout_previsto_p90_pct": float(previsto_p90),
             }
         )
         densidades_posteriores.append(
@@ -1069,7 +1091,7 @@ if USAR_PAYOUT_BAYESIANO:
         )
 
     figura_payout.suptitle(
-        "Densidade posterior do payout médio, 2016-2025",
+        "Densidade posterior do payout mediano, 2016-2025",
         fontsize=14,
     )
     figura_payout.tight_layout(rect=(0, 0, 1, 0.96))
@@ -1099,11 +1121,11 @@ if USAR_PAYOUT_BAYESIANO:
 payout_medio_itub3 = payout_medio_por_empresa.get("ITUB3.SA", np.nan)
 payout_medio_fesa4 = payout_medio_por_empresa.get("FESA4.SA", np.nan)
 payout_medio_egie3 = payout_medio_por_empresa.get("EGIE3.SA", np.nan)
-payout_medio_vale5 = payout_medio_por_empresa.get("VALE5.SA", np.nan)
+payout_medio_vale3 = payout_medio_por_empresa.get("VALE3.SA", np.nan)
 
 relatorio_payout = payout_anual_percentual.copy()
 relatorio_payout.columns = [f"payout_{ano}_pct" for ano in anos_payout]
-relatorio_payout["payout_medio_2016_2025_pct"] = payout_medio_por_empresa
+relatorio_payout["payout_central_2016_2025_pct"] = payout_medio_por_empresa
 if payout_resumo_bayesiano is not None:
     relatorio_payout = relatorio_payout.join(
         payout_resumo_bayesiano.drop(columns="anos_observados")
@@ -1114,7 +1136,7 @@ arquivo_payout = OUTPUT_DIR / "payout_estimado_2016_2025.csv"
 relatorio_payout.to_csv(arquivo_payout, decimal=",", float_format="%.2f")
 
 metodo_payout = (
-    "média posterior Bayesiana"
+    "mediana posterior Bayesiana"
     if USAR_PAYOUT_BAYESIANO
     else "média aritmética"
 )
