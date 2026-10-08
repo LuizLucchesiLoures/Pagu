@@ -64,10 +64,12 @@ O programa espera estes arquivos dentro de `data_input/`:
 | `proventos.csv` | proventos anuais por ação |
 | `INPC_anual.csv` | INPC anual local, usado como alternativa à API |
 
-Os quatro primeiros arquivos usam colunas separadas por tabulação e vírgula
-como separador decimal. A primeira coluna identifica o ticker da empresa e as
-demais colunas identificam anos. Os tickers e anos devem corresponder entre os
-arquivos. `INPC_anual.csv` tem uma coluna `ano` e uma coluna `INPC`.
+Os quatro primeiros arquivos usam colunas separadas por tabulação. `FCL.csv` e
+`Capex_Expancao.csv` usam vírgula como separador decimal; os valores de
+`FCL_futuro_projetado.csv` e `proventos.csv` usam ponto decimal. A primeira
+coluna identifica o ticker da empresa e as demais colunas identificam anos.
+Os tickers e anos devem corresponder entre os arquivos.
+`INPC_anual.csv` tem uma coluna `ano` e uma coluna `INPC`.
 
 Os arquivos de entrada originais são preservados. Resultados recalculados,
 como o FCL corrigido pelo INPC e os relatórios de payout, ficam em
