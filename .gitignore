@@ -167,6 +167,7 @@ cython_debug/
 !/data_input/Capex_Expancao.csv
 !/data_input/FCL_futuro_projetado.csv
 !/data_input/proventos.csv
+!/data_input/proventos_totais.csv
 !/data_input/INPC_anual.csv
 /data_input/*.swp
 

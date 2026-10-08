@@ -918,6 +918,27 @@ proventos_totais_estimados = proventos_por_acao.mul(
     quantidades_acoes_payout,
     axis="index",
 ) / 1_000_000_000
+
+# Dividendo total pago (R$ bilhões, mesma unidade do FCL), preenchido à mão.
+# Onde houver valor, ele substitui a estimativa provento/ação x ações atuais,
+# evitando o erro causado por mudanças no número de ações ao longo dos anos.
+proventos_totais_informados = pd.read_csv(
+    BASE_DIR / "data_input" / "proventos_totais.csv",
+    sep="\t",
+    decimal=".",
+    index_col=0,
+)
+proventos_totais_informados.index = proventos_totais_informados.index.str.strip()
+proventos_totais_informados.columns = proventos_totais_informados.columns.astype(int)
+proventos_totais_informados = (
+    proventos_totais_informados.apply(pd.to_numeric, errors="coerce")
+    .reindex(index=empresas, columns=anos_payout)
+)
+proventos_totais_estimados = proventos_totais_informados.combine_first(
+    proventos_totais_estimados
+)
+print("\nProventos totais informados (R$ bi; vazio = usa provento/ação x ações atuais):")
+print(proventos_totais_informados)
 payout_anual_percentual = proventos_totais_estimados.div(
     fcl_payout.replace(0, np.nan)
 ).mul(100)
@@ -1141,7 +1162,8 @@ metodo_payout = (
     else "média aritmética"
 )
 print(
-    f"Payout estimado pela {metodo_payout}: proventos por ação x quantidade "
+    f"Payout estimado pela {metodo_payout}: dividendo total informado em "
+    "proventos_totais.csv ou, onde vazio, proventos por ação x quantidade "
     "atual de ações, dividido pelo FCL nominal."
 )
 print(relatorio_payout)
