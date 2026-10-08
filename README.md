@@ -62,7 +62,7 @@ O programa espera estes arquivos dentro de `data_input/`:
 | `Capex_Expancao.csv` | Capex de expansão usado para ajustar o FCL |
 | `FCL_futuro_projetado.csv` | projeções futuras opcionais por empresa |
 | `proventos.csv` | proventos anuais por ação |
-| `proventos_totais.csv` | dividendo total pago por ano, em R$ bilhões (opcional; célula vazia = usa proventos por ação × ações atuais) |
+| `proventos_totais.csv` | dividendo total pago por ano, em R$ bilhões (opcional; colunas separadas por espaço ou Tab; `NaN` = usa proventos por ação × ações atuais) |
 | `INPC_anual.csv` | INPC anual local, usado como alternativa à API |
 
 Os quatro primeiros arquivos usam colunas separadas por tabulação. `FCL.csv` e

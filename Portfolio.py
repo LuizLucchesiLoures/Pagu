@@ -924,7 +924,7 @@ proventos_totais_estimados = proventos_por_acao.mul(
 # evitando o erro causado por mudanças no número de ações ao longo dos anos.
 proventos_totais_informados = pd.read_csv(
     BASE_DIR / "data_input" / "proventos_totais.csv",
-    sep="\t",
+    sep=r"\s+",
     decimal=".",
     index_col=0,
 )
@@ -937,7 +937,7 @@ proventos_totais_informados = (
 proventos_totais_estimados = proventos_totais_informados.combine_first(
     proventos_totais_estimados
 )
-print("\nProventos totais informados (R$ bi; vazio = usa provento/ação x ações atuais):")
+print("\nProventos totais informados (R$ bi; NaN = usa provento/ação x ações atuais):")
 print(proventos_totais_informados)
 payout_anual_percentual = proventos_totais_estimados.div(
     fcl_payout.replace(0, np.nan)
