@@ -20,10 +20,17 @@ FIG_DIR = BASE_DIR / "fig" / "FCL"
 OUTPUT_DIR = BASE_DIR / "data_output"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+def criar_anos_projecao(ano_inicial, ano_final):
+    """Cria a sequência inclusiva de anos definida nas opções do programa."""
+    return np.arange(ano_inicial, ano_final + 1)
+
+
 ano_inicial = 2016
-ano_final = 2037
-ano_final_plot = 2035
-anos_projecao = np.arange(ano_inicial, ano_final)
+ano_final = 2064
+ano_final_plot = 2064
+anos_projecao = criar_anos_projecao(ano_inicial, ano_final)
 empresas = ["ITUB3.SA", "FESA4.SA", "EGIE3.SA", "VALE3.SA"]
 empresas_multivariadas = empresas
 USAR_FCL_CORRIGIDO_capex_expandido = True
@@ -39,8 +46,8 @@ TICKERS_YAHOO_ACOES = {
     "EGIE3.SA": ("EGIE3.SA",),
     "VALE3.SA": ("VALE3.SA",),
 }
-
 def buscar_quantidade_acoes_yahoo(tickers):
+    """Consulta no Yahoo Finance as quantidades de ações dos tickers."""
     quantidades = {}
     registros = []
 
@@ -145,76 +152,503 @@ def ler_inpc_anual(ano_inicial):
         raise
 
 
+def ler_dados_entrada(diretorio_dados):
+    """Lê os CSVs usados na análise e padroniza os nomes de anos e tickers.
+
+    Retorna FCL, capex de expansão, FCL projetado e proventos por ação,
+    mantendo a ordem esperada pelo restante do programa.
+    """
+    opcoes_csv = {
+        "sep": "\t",
+        "index_col": 0,
+    }
+    fcl = pd.read_csv(diretorio_dados / "FCL.csv", decimal=",", **opcoes_csv)
+    capex_expansao = pd.read_csv(
+        diretorio_dados / "Capex_Expancao.csv",
+        decimal=",",
+        **opcoes_csv,
+    )
+    fcl_futuro_projetado = pd.read_csv(
+        diretorio_dados / "FCL_futuro_projetado.csv",
+        decimal=",",
+        **opcoes_csv,
+    )
+    proventos_anuais = pd.read_csv(
+        diretorio_dados / "proventos.csv",
+        decimal=",",
+        **opcoes_csv,
+    )
+
+    fcl.columns = fcl.columns.str.strip()
+    capex_expansao.columns = capex_expansao.columns.str.strip()
+    fcl_futuro_projetado.columns = fcl_futuro_projetado.columns.str.strip()
+    fcl_futuro_projetado.index = fcl_futuro_projetado.index.str.strip()
+    fcl_futuro_projetado.columns = (
+        fcl_futuro_projetado.columns.str.extract(r"(\d{4})", expand=False).astype(int)
+    )
+    proventos_anuais.columns = proventos_anuais.columns.str.strip()
+
+    return fcl, capex_expansao, fcl_futuro_projetado, proventos_anuais
+
+
+def preparar_dados_fcl(fcl, capex_expansao, inpc_anual, usar_capex, diretorio_saida):
+    """Aplica o ajuste de capex e calcula o FCL histórico corrigido pelo INPC.
+
+    Retorna o FCL após o ajuste opcional de capex, os fatores de correção,
+    o ano-base de preços e o FCL corrigido.
+    """
+    if usar_capex:
+        fcl = fcl.add(capex_expansao, fill_value=0)
+
+    ano_base_fcl = int(inpc_anual.index.max())
+    anos_fcl = fcl.columns.astype(int)
+    fatores_correcao_inpc = pd.Series(
+        {
+            ano: np.prod(
+                1 + inpc_anual.loc[ano + 1 : ano_base_fcl, "INPC"].to_numpy() / 100
+            )
+            for ano in anos_fcl
+        },
+        name="fator_correcao_inpc",
+    )
+    fatores_correcao_inpc.index = fcl.columns
+    fcl_corrigido = fcl.mul(fatores_correcao_inpc, axis="columns")
+    fcl_corrigido.to_csv(
+        diretorio_saida / "FCL_corrigido_INPC.csv",
+        sep="\t",
+        decimal=",",
+    )
+    return fcl, fatores_correcao_inpc, ano_base_fcl, fcl_corrigido
+
+
+def ajustar_modelo_multivariado(dados_fcl, usar_correlacao):
+    """Ajusta o modelo bayesiano conjunto aos FCLs das empresas.
+
+    Cada empresa tem intercepto e tendência próprios. A opção
+    `usar_correlacao` controla se os resíduos compartilham correlações.
+    Retorna os resultados MCMC e os arrays usados nas previsões.
+    """
+    anos = dados_fcl.index.astype(float).to_numpy()
+    fcl_observado = dados_fcl.to_numpy(dtype=float)
+    anos_padronizados = (anos - anos.mean()) / anos.std()
+    numero_empresas = dados_fcl.shape[1]
+
+    with pm.Model() as modelo:
+        alpha = pm.Normal(
+            "alpha",
+            mu=fcl_observado.mean(axis=0),
+            sigma=10,
+            shape=numero_empresas,
+        )
+        beta = pm.Normal(
+            "beta",
+            mu=0,
+            sigma=10,
+            shape=numero_empresas,
+        )
+
+        if usar_correlacao:
+            chol, _, _ = pm.LKJCholeskyCov(
+                "covariancia",
+                n=numero_empresas,
+                eta=2,
+                sd_dist=pm.Exponential.dist(1),
+                compute_corr=True,
+            )
+        else:
+            desvios = pm.Exponential(
+                "covariancia_stds",
+                lam=1,
+                shape=numero_empresas,
+            )
+            chol = pt.diag(desvios)
+
+        media_fcl = (
+            alpha[None, :]
+            + beta[None, :] * anos_padronizados[:, None]
+        )
+        pm.MvNormal(
+            "FCL_observado",
+            mu=media_fcl,
+            chol=chol,
+            observed=fcl_observado,
+        )
+        idata = pm.sample(
+            draws=1000,
+            tune=1000,
+            chains=2,
+            cores=1,
+            target_accept=0.90,
+            random_seed=42,
+            return_inferencedata=True,
+        )
+
+    return modelo, idata, anos, fcl_observado
+
+
+def extrair_amostras_covariancia(idata, usar_correlacao, numero_empresas):
+    """Extrai draws de parâmetros e monta covariância para cada draw posterior."""
+    alpha_amostras = (
+        idata.posterior["alpha"].stack(amostra=("chain", "draw")).values
+    )
+    beta_amostras = (
+        idata.posterior["beta"].stack(amostra=("chain", "draw")).values
+    )
+    desvios_amostras = (
+        idata.posterior["covariancia_stds"]
+        .stack(amostra=("chain", "draw"))
+        .values
+    )
+
+    if usar_correlacao:
+        correlacao_amostras = (
+            idata.posterior["covariancia_corr"]
+            .stack(amostra=("chain", "draw"))
+            .values
+        )
+    else:
+        correlacao_amostras = np.broadcast_to(
+            np.eye(numero_empresas)[:, :, None],
+            (
+                numero_empresas,
+                numero_empresas,
+                desvios_amostras.shape[1],
+            ),
+        ).copy()
+
+    covariancia_amostras = np.empty(
+        (desvios_amostras.shape[1], numero_empresas, numero_empresas)
+    )
+    for indice_amostra in range(desvios_amostras.shape[1]):
+        matriz_desvios = np.diag(desvios_amostras[:, indice_amostra])
+        correlacao = correlacao_amostras[:, :, indice_amostra]
+        covariancia_amostras[indice_amostra] = (
+            matriz_desvios @ correlacao @ matriz_desvios
+        )
+
+    return (
+        alpha_amostras,
+        beta_amostras,
+        desvios_amostras,
+        correlacao_amostras,
+        covariancia_amostras,
+    )
+
+
+def simular_previsoes_multivariadas(
+    anos_historicos,
+    anos_projecao,
+    alpha_amostras,
+    beta_amostras,
+    covariancia_amostras,
+    random_seed=42,
+):
+    """Simula FCL conjunto por draw posterior e ano de projeção.
+
+    A dimensão da saída é (draws, anos, empresas), preservando a correlação
+    entre empresas em cada amostra.
+    """
+    anos_padronizados = (
+        anos_projecao - anos_historicos.mean()
+    ) / anos_historicos.std()
+    numero_empresas = alpha_amostras.shape[0]
+    previsoes = np.empty(
+        (alpha_amostras.shape[1], len(anos_projecao), numero_empresas)
+    )
+    rng = np.random.default_rng(random_seed)
+
+    for indice_amostra in range(alpha_amostras.shape[1]):
+        media_projecao = (
+            alpha_amostras[:, indice_amostra][None, :]
+            + beta_amostras[:, indice_amostra][None, :]
+            * anos_padronizados[:, None]
+        )
+        erros = rng.multivariate_normal(
+            mean=np.zeros(numero_empresas),
+            cov=covariancia_amostras[indice_amostra],
+            size=len(anos_projecao),
+        )
+        previsoes[indice_amostra] = media_projecao + erros
+
+    return previsoes
+
+
+def ajustar_modelo_payout(observacoes, random_seed):
+    """Ajusta a distribuição log-normal do payout anual positivo."""
+    with pm.Model() as modelo:
+        payout_mu_log = pm.Normal("payout_mu_log", mu=np.log(50.0), sigma=1.0)
+        payout_sigma_log = pm.HalfNormal("payout_sigma_log", sigma=1.0)
+        pm.LogNormal(
+            "payout_anual_observado",
+            mu=payout_mu_log,
+            sigma=payout_sigma_log,
+            observed=observacoes,
+        )
+        pm.Deterministic("payout_mediano", pt.exp(payout_mu_log))
+        pm.Deterministic(
+            "payout_medio",
+            pt.exp(payout_mu_log + payout_sigma_log**2 / 2),
+        )
+        idata = pm.sample(
+            draws=2000,
+            tune=1000,
+            chains=2,
+            cores=1,
+            target_accept=0.93,
+            random_seed=random_seed,
+            return_inferencedata=True,
+            progressbar=False,
+        )
+    return idata
+
+
+def ajustar_modelo_payout_dependente(tabela, indice_empresa, centro_log_fcl):
+    """Ajusta payout log-normal cujo centro depende do log do FCL.
+
+    O parâmetro gamma mede a associação: gamma negativo corresponde a payout
+    relativamente maior quando o FCL observado é menor.
+    """
+    log_fcl = np.log(tabela["fcl"].to_numpy(dtype=float))
+    with pm.Model() as modelo:
+        dep_mu = pm.Normal("dep_mu", mu=np.log(50.0), sigma=1.0)
+        dep_gamma = pm.Normal("dep_gamma", mu=0.0, sigma=0.5)
+        dep_sigma = pm.HalfNormal("dep_sigma", sigma=1.0)
+        pm.LogNormal(
+            "payout_dep_observado",
+            mu=dep_mu + dep_gamma * (log_fcl - centro_log_fcl),
+            sigma=dep_sigma,
+            observed=tabela["payout"].to_numpy(dtype=float),
+        )
+        idata = pm.sample(
+            draws=2000,
+            tune=1000,
+            chains=2,
+            cores=1,
+            target_accept=0.93,
+            random_seed=142 + indice_empresa,
+            return_inferencedata=True,
+            progressbar=False,
+        )
+    return idata
+
+
+def simular_dividendos_futuros(
+    anos_projecao,
+    ano_final,
+    previsoes_fcl,
+    empresas,
+    parametros_independentes,
+    parametros_dependentes,
+    payout_independente,
+    random_seed=2026,
+):
+    """Combina draws futuros de FCL e payout para simular dividendos.
+
+    FCL negativo é limitado a zero para não produzir dividendos negativos.
+    Retorna os anos incluídos e uma matriz (draws, anos, empresas).
+    """
+    mascara_anos = anos_projecao <= ano_final
+    anos_dividendos = anos_projecao[mascara_anos]
+    fcl_amostras = previsoes_fcl[:, mascara_anos, :]
+    rng = np.random.default_rng(random_seed)
+    dividendos_amostras = np.full(fcl_amostras.shape, np.nan)
+
+    for indice_empresa, empresa in enumerate(empresas):
+        if payout_independente:
+            if empresa not in parametros_independentes:
+                continue
+            mu_amostras, sigma_amostras = parametros_independentes[empresa]
+        else:
+            if empresa not in parametros_dependentes:
+                continue
+            mu_dep, gamma_dep, sigma_dep, centro_log_fcl = (
+                parametros_dependentes[empresa]
+            )
+
+        fcl_empresa = np.clip(fcl_amostras[:, :, indice_empresa], 0, None)
+        formato = fcl_empresa.shape
+        numero_amostras = fcl_empresa.shape[0]
+        if payout_independente:
+            sorteio = rng.integers(0, mu_amostras.size, numero_amostras)
+            mu_payout = np.broadcast_to(mu_amostras[sorteio][:, None], formato)
+            sigma_payout = np.broadcast_to(
+                sigma_amostras[sorteio][:, None], formato
+            )
+        else:
+            sorteio = rng.integers(0, mu_dep.size, numero_amostras)
+            log_fcl_futuro = np.log(np.where(fcl_empresa > 0, fcl_empresa, 1.0))
+            mu_payout = (
+                mu_dep[sorteio][:, None]
+                + gamma_dep[sorteio][:, None]
+                * (log_fcl_futuro - centro_log_fcl)
+            )
+            sigma_payout = np.broadcast_to(
+                sigma_dep[sorteio][:, None], formato
+            )
+
+        payout_futuro = pm.draw(
+            pm.LogNormal.dist(mu=mu_payout, sigma=sigma_payout),
+            random_seed=int(rng.integers(1_000_000)),
+        )
+        dividendos_amostras[:, :, indice_empresa] = payout_futuro / 100 * fcl_empresa
+
+    return anos_dividendos, dividendos_amostras
+
+
+def resumir_dividendos(anos_dividendos, dividendos_amostras, empresas, quantidades):
+    """Resume os draws de dividendos por empresa e ano em R$ bi e por ação."""
+    linhas = []
+    quantidades_por_empresa = pd.Series(quantidades, dtype=float)
+    for indice_empresa, empresa in enumerate(empresas):
+        for indice_ano, ano in enumerate(anos_dividendos):
+            amostras = dividendos_amostras[:, indice_ano, indice_empresa]
+            if np.isnan(amostras).all():
+                continue
+            p10, p50, p90 = np.percentile(amostras, [10, 50, 90])
+            acoes_bilhoes = quantidades_por_empresa[empresa] / 1e9
+            linhas.append(
+                {
+                    "ticker": empresa,
+                    "ano": int(ano),
+                    "dividendo_media_rs_bi": amostras.mean(),
+                    "dividendo_p10_rs_bi": p10,
+                    "dividendo_p50_rs_bi": p50,
+                    "dividendo_p90_rs_bi": p90,
+                    "dividendo_por_acao_p10": p10 / acoes_bilhoes,
+                    "dividendo_por_acao_p50": p50 / acoes_bilhoes,
+                    "dividendo_por_acao_p90": p90 / acoes_bilhoes,
+                }
+            )
+    return pd.DataFrame(linhas)
+
+
+def plotar_dividendos(
+    relatorio,
+    dividendos_historicos,
+    empresas,
+    ano_inicial,
+    ano_final,
+    ultimo_ano_observado,
+    ano_base_fcl,
+    modo,
+    caminho_saida,
+):
+    """Desenha observações históricas e a preditiva de dividendos P10/P50/P90."""
+    figura, eixos = plt.subplots(2, 2, figsize=(14, 8), squeeze=False)
+    for indice_empresa, empresa in enumerate(empresas):
+        eixo = eixos.flat[indice_empresa]
+        tabela = relatorio[relatorio["ticker"] == empresa]
+        if tabela.empty:
+            eixo.set_axis_off()
+            continue
+
+        historico = dividendos_historicos.loc[empresa].dropna()
+        eixo.scatter(
+            historico.index, historico.to_numpy(), color="black",
+            label="Dividendo observado",
+        )
+        eixo.plot(
+            tabela["ano"], tabela["dividendo_p50_rs_bi"], color="blue",
+            label="Dividendo mediano",
+        )
+        eixo.plot(
+            tabela["ano"], tabela["dividendo_p90_rs_bi"], color="green",
+            linestyle="--", label="Dividendo P90",
+        )
+        eixo.plot(
+            tabela["ano"], tabela["dividendo_p10_rs_bi"], color="red",
+            linestyle="--", label="Dividendo P10",
+        )
+        eixo.axvline(ultimo_ano_observado + 0.5, color="gray", linestyle=":")
+        eixo.set_xlim(ano_inicial - 0.5, ano_final + 0.5)
+        eixo.set_xticks(range(ano_inicial, ano_final + 1, 2))
+        eixo.set_title(f"{empresa} - dividendos até {ano_final}")
+        eixo.set_xlabel("Ano")
+        eixo.set_ylabel(f"R$ bi (preços de {ano_base_fcl})")
+        eixo.grid(alpha=0.3)
+        eixo.legend(fontsize=8, framealpha=0.6)
+
+    figura.suptitle(
+        f"Dividendos totais: observados e P10/mediana/P90 do modelo, "
+        f"{ano_inicial}-{ano_final} (payout {modo} do FCL)"
+    )
+    figura.tight_layout()
+    figura.savefig(caminho_saida, dpi=200)
+    plt.close(figura)
+
+
+def calcular_payout_historico(
+    proventos_anuais,
+    fcl,
+    quantidades_acoes,
+    empresas,
+    caminho_proventos_totais,
+):
+    """Calcula payout anual e combina proventos informados com estimados.
+
+    Quando um dividendo total anual foi preenchido no CSV, ele prevalece;
+    células vazias usam proventos por ação multiplicados pelas ações atuais.
+    """
+    anos_payout = pd.Index(range(2016, 2026), dtype=int)
+    proventos_anuais = proventos_anuais.copy()
+    proventos_anuais.index = proventos_anuais.index.str.strip()
+    proventos_anuais.columns = proventos_anuais.columns.astype(int)
+    proventos_anuais = proventos_anuais.apply(pd.to_numeric, errors="coerce")
+    proventos_por_acao = proventos_anuais.reindex(
+        index=empresas,
+        columns=anos_payout,
+    )
+
+    fcl_payout = fcl.reindex(index=empresas).copy()
+    fcl_payout.columns = fcl_payout.columns.astype(int)
+    fcl_payout = fcl_payout.reindex(columns=anos_payout)
+    fcl_payout = fcl_payout.where(fcl_payout > 0)
+    quantidades = pd.Series(quantidades_acoes, dtype=float).reindex(empresas)
+    dividendos_totais = proventos_por_acao.mul(quantidades, axis="index") / 1e9
+
+    dividendos_informados = pd.read_csv(
+        caminho_proventos_totais,
+        sep=r"\s+",
+        decimal=".",
+        index_col=0,
+    )
+    dividendos_informados.index = dividendos_informados.index.str.strip()
+    dividendos_informados.columns = dividendos_informados.columns.astype(int)
+    dividendos_informados = (
+        dividendos_informados.apply(pd.to_numeric, errors="coerce")
+        .reindex(index=empresas, columns=anos_payout)
+    )
+    dividendos_totais = dividendos_informados.combine_first(dividendos_totais)
+    payout_anual = dividendos_totais.div(fcl_payout.replace(0, np.nan)).mul(100)
+    payout_medio = payout_anual.mean(axis="columns")
+    return (
+        anos_payout,
+        payout_anual,
+        payout_medio,
+        dividendos_totais,
+        dividendos_informados,
+    )
+
+
 inpc_anual = ler_inpc_anual(ano_inicial)
 inpc_anual.to_csv(OUTPUT_DIR / "INPC_anual.csv", decimal=",")
 print("INPC anual carregado:")
 print(inpc_anual)
 
-#leitura do FLC
-fcl = pd.read_csv(
-    BASE_DIR / "data_input" / "FCL.csv",
-    sep="\t",
-    decimal=",",
-    index_col=0,
+fcl, capex_expansao, fcl_futuro_projetado, proventos_anuais = ler_dados_entrada(
+    BASE_DIR / "data_input"
 )
-
-#leitura do Capex de expansão
-capex_expansao = pd.read_csv(
-    BASE_DIR / "data_input" / "Capex_Expancao.csv",
-    sep="\t",
-    decimal=",",
-    index_col=0,
-)
-
-#leitura do FCL futuro projetado dos projetos de desenvolvimento
-fcl_futuro_projetado = pd.read_csv(
-    BASE_DIR / "data_input" / "FCL_futuro_projetado.csv",
-    sep="\t",
-    decimal=",",
-    index_col=0,
-)
-
-#leitura dos proventos anuais por ação, para cálculo do dividend yield futuro
-proventos_anuais = pd.read_csv(
-    BASE_DIR / "data_input" / "proventos.csv",
-    sep="\t",
-    decimal=",",
-    index_col=0,
-)
-
-fcl.columns = fcl.columns.str.strip()
-capex_expansao.columns = capex_expansao.columns.str.strip()
-fcl_futuro_projetado.columns = fcl_futuro_projetado.columns.str.strip()
-fcl_futuro_projetado.index = fcl_futuro_projetado.index.str.strip()
-fcl_futuro_projetado.columns = (
-    fcl_futuro_projetado.columns.str.extract(r"(\d{4})", expand=False).astype(int)
-)
-proventos_anuais.columns = proventos_anuais.columns.str.strip()
-
-#-------------------------------------------------------------------
-# Ajusta o FCL adicionando o Capex de expansão, se disponível.
-
-if USAR_FCL_CORRIGIDO_capex_expandido:
-    fcl = fcl.add(capex_expansao, fill_value=0)
-
-# Corrige os valores históricos do FCL para preços do último ano disponível.
-ano_base_fcl = int(inpc_anual.index.max())
-anos_fcl = fcl.columns.astype(int)
-fatores_correcao_inpc = pd.Series(
-    {
-        ano: np.prod(
-            1 + inpc_anual.loc[ano + 1 : ano_base_fcl, "INPC"].to_numpy() / 100
-        )
-        for ano in anos_fcl
-    },
-    name="fator_correcao_inpc",
-)
-fatores_correcao_inpc.index = fcl.columns
-fcl_corrigido = fcl.mul(fatores_correcao_inpc, axis="columns")
-fcl_corrigido.to_csv(
-    OUTPUT_DIR / "FCL_corrigido_INPC.csv",
-    sep="\t",
-    decimal=",",
+(
+    fcl,
+    fatores_correcao_inpc,
+    ano_base_fcl,
+    fcl_corrigido,
+) = preparar_dados_fcl(
+    fcl=fcl,
+    capex_expansao=capex_expansao,
+    inpc_anual=inpc_anual,
+    usar_capex=USAR_FCL_CORRIGIDO_capex_expandido,
+    diretorio_saida=OUTPUT_DIR,
 )
 print(f"FCL corrigido para preços de {ano_base_fcl}:")
 print(fcl_corrigido)
@@ -229,6 +663,10 @@ print(f"FCL utilizado: {nome_serie_fcl}")
 
 
 def construir_modelo_bayesiano(ticker, eixos):
+    """Ajusta o modelo individual de FCL e preenche seus quatro gráficos.
+
+    Retorna o modelo PyMC, os resultados posteriores e os resumos preditivos.
+    """
     anos = np.asarray(fcl_utilizado.columns, dtype=float)
     fluxo_caixa = fcl_utilizado.loc[ticker].astype(float).to_numpy()
     anos_padronizados = (anos - anos.mean()) / anos.std()
@@ -253,7 +691,7 @@ def construir_modelo_bayesiano(ticker, eixos):
     beta_amostras = idata.posterior["beta"].values.flatten()
     sigma_amostras = idata.posterior["sigma"].values.flatten()
 
-    #anos_projecao = np.arange(2016, 2037)
+
     anos_projecao_padronizados = (anos_projecao - anos.mean()) / anos.std()
     media_previsao = (
         alpha_amostras[:, None]
@@ -382,75 +820,16 @@ if not USAR_EMPRESAS_MUTLIVARIADAS:
 
 # Matriz: linhas = anos; colunas = empresas
 dados_fcl = fcl_utilizado.loc[empresas_multivariadas].T
-
-anos = dados_fcl.index.astype(float).to_numpy()
-fcl_observado = dados_fcl.to_numpy(dtype=float)
-
-# Padronização dos anos
-anos_padronizados = (anos - anos.mean()) / anos.std()
-
 numero_empresas = len(empresas_multivariadas)
-
-with pm.Model() as modelo_multivariado:
-
-    # Intercepto de cada empresa
-    alpha = pm.Normal(
-        "alpha",
-        mu=fcl_observado.mean(axis=0),
-        sigma=10,
-        shape=numero_empresas,
-    )
-
-    # Inclinação da regressão de cada empresa
-    beta = pm.Normal(
-        "beta",
-        mu=0,
-        sigma=10,
-        shape=numero_empresas,
-    )
-
-    # Liga ou desliga a correlação entre os resíduos das empresas.
-    if USAR_EMPRESAS_MUTLIVARIADAS:
-        chol, correlacao, desvios = pm.LKJCholeskyCov(
-            "covariancia",
-            n=numero_empresas,
-            eta=2,
-            sd_dist=pm.Exponential.dist(1),
-            compute_corr=True,
-        )
-    else:
-        desvios = pm.Exponential(
-            "covariancia_stds",
-            lam=1,
-            shape=numero_empresas,
-        )
-        correlacao = pt.eye(numero_empresas)
-        chol = pt.diag(desvios)
-
-    # Média esperada do FCL para cada ano e empresa
-    media_fcl = (
-        alpha[None, :]
-        + beta[None, :] * anos_padronizados[:, None]
-    )
-
-    # Likelihood multivariada
-    pm.MvNormal(
-        "FCL_observado",
-        mu=media_fcl,
-        chol=chol,
-        observed=fcl_observado,
-    )
-
-    # Inferência bayesiana
-    idata_multivariado = pm.sample(
-        draws=1000,
-        tune=1000,
-        chains=2,
-        cores=1,
-        target_accept=0.90,
-        random_seed=42,
-        return_inferencedata=True,
-    )
+(
+    modelo_multivariado,
+    idata_multivariado,
+    anos,
+    fcl_observado,
+) = ajustar_modelo_multivariado(
+    dados_fcl=dados_fcl,
+    usar_correlacao=USAR_EMPRESAS_MUTLIVARIADAS,
+)
 
 
 # Resumo dos parâmetros individuais
@@ -494,40 +873,17 @@ resumo_correlacao.to_csv(
 )
 
 
-# Extrai as amostras posteriores dos parâmetros
-alpha_amostras = (
-    idata_multivariado.posterior["alpha"]
-    .stack(amostra=("chain", "draw"))
-    .values
+(
+    alpha_amostras,
+    beta_amostras,
+    desvios_amostras,
+    correlacao_amostras,
+    covariancia_amostras,
+) = extrair_amostras_covariancia(
+    idata=idata_multivariado,
+    usar_correlacao=USAR_EMPRESAS_MUTLIVARIADAS,
+    numero_empresas=numero_empresas,
 )
-
-beta_amostras = (
-    idata_multivariado.posterior["beta"]
-    .stack(amostra=("chain", "draw"))
-    .values
-)
-
-desvios_amostras = (
-    idata_multivariado.posterior["covariancia_stds"]
-    .stack(amostra=("chain", "draw"))
-    .values
-)
-
-if USAR_EMPRESAS_MUTLIVARIADAS:
-    correlacao_amostras = (
-        idata_multivariado.posterior["covariancia_corr"]
-        .stack(amostra=("chain", "draw"))
-        .values
-    )
-else:
-    correlacao_amostras = np.broadcast_to(
-        np.eye(numero_empresas)[:, :, None],
-        (
-            numero_empresas,
-            numero_empresas,
-            desvios_amostras.shape[1],
-        ),
-    ).copy()
 
 
 # Matriz de correlação média posterior
@@ -541,27 +897,6 @@ print(
         columns=empresas_multivariadas,
     )
 )
-
-
-# Calcula a matriz de covariância para cada amostra posterior
-covariancia_amostras = np.empty(
-    (
-        desvios_amostras.shape[1],
-        numero_empresas,
-        numero_empresas,
-    )
-)
-
-for indice_amostra in range(desvios_amostras.shape[1]):
-    matriz_desvios = np.diag(
-        desvios_amostras[:, indice_amostra]
-    )
-
-    covariancia_amostras[indice_amostra] = (
-        matriz_desvios
-        @ correlacao_amostras[:, :, indice_amostra]
-        @ matriz_desvios
-    )
 
 
 # Matriz de covariância média posterior
@@ -642,25 +977,14 @@ plt.close(figura_correlacao)
 
 
 # Figura do modelo multivariado, no mesmo formato da figura individual.
-anos_projecao = np.arange(2016, 2037)
-anos_projecao_padronizados = (anos_projecao - anos.mean()) / anos.std()
-rng = np.random.default_rng(42)
-previsoes_multivariadas = np.empty(
-    (alpha_amostras.shape[1], len(anos_projecao), numero_empresas)
+#anos_projecao = np.arange(2016, 2037)
+previsoes_multivariadas = simular_previsoes_multivariadas(
+    anos_historicos=anos,
+    anos_projecao=anos_projecao,
+    alpha_amostras=alpha_amostras,
+    beta_amostras=beta_amostras,
+    covariancia_amostras=covariancia_amostras,
 )
-
-for indice_amostra in range(alpha_amostras.shape[1]):
-    media_projecao = (
-        alpha_amostras[:, indice_amostra][None, :]
-        + beta_amostras[:, indice_amostra][None, :]
-        * anos_projecao_padronizados[:, None]
-    )
-    erros_multivariados = rng.multivariate_normal(
-        mean=np.zeros(numero_empresas),
-        cov=covariancia_amostras[indice_amostra],
-        size=len(anos_projecao),
-    )
-    previsoes_multivariadas[indice_amostra] = media_projecao + erros_multivariados
 
 fcl_medio_multivariado = previsoes_multivariadas.mean(axis=0)
 fcl_p90_multivariado = np.percentile(previsoes_multivariadas, 90, axis=0)
@@ -898,52 +1222,21 @@ print(f"Figura multivariada salva em: {nome_figura_multivariada}")
 #-----------------------------------------------------------------
 #calculo de dividendos futuros com base no FCL projetado
 
-#calculo de pay-out médio
-anos_payout = pd.Index(range(2016, 2026), dtype=int)
-
-proventos_anuais.index = proventos_anuais.index.str.strip()
-proventos_anuais.columns = proventos_anuais.columns.astype(int)
-proventos_anuais = proventos_anuais.apply(pd.to_numeric, errors="coerce")
-proventos_por_acao = proventos_anuais.reindex(
-    index=empresas,
-    columns=anos_payout,
-)
-
-fcl_payout = fcl.reindex(index=empresas).copy()
-fcl_payout.columns = fcl_payout.columns.astype(int)
-fcl_payout = fcl_payout.reindex(columns=anos_payout)
-fcl_payout = fcl_payout.where(fcl_payout > 0)
-
-quantidades_acoes_payout = pd.Series(quantidades_acoes, dtype=float).reindex(empresas)
-proventos_totais_estimados = proventos_por_acao.mul(
-    quantidades_acoes_payout,
-    axis="index",
-) / 1_000_000_000
-
-# Dividendo total pago (R$ bilhões, mesma unidade do FCL), preenchido à mão.
-# Onde houver valor, ele substitui a estimativa provento/ação x ações atuais,
-# evitando o erro causado por mudanças no número de ações ao longo dos anos.
-proventos_totais_informados = pd.read_csv(
-    BASE_DIR / "data_input" / "proventos_totais.csv",
-    sep=r"\s+",
-    decimal=".",
-    index_col=0,
-)
-proventos_totais_informados.index = proventos_totais_informados.index.str.strip()
-proventos_totais_informados.columns = proventos_totais_informados.columns.astype(int)
-proventos_totais_informados = (
-    proventos_totais_informados.apply(pd.to_numeric, errors="coerce")
-    .reindex(index=empresas, columns=anos_payout)
-)
-proventos_totais_estimados = proventos_totais_informados.combine_first(
-    proventos_totais_estimados
+(
+    anos_payout,
+    payout_anual_percentual,
+    payout_medio_por_empresa,
+    proventos_totais_estimados,
+    proventos_totais_informados,
+) = calcular_payout_historico(
+    proventos_anuais=proventos_anuais,
+    fcl=fcl,
+    quantidades_acoes=quantidades_acoes,
+    empresas=empresas,
+    caminho_proventos_totais=BASE_DIR / "data_input" / "proventos_totais.csv",
 )
 print("\nProventos totais informados (R$ bi; NaN = usa provento/ação x ações atuais):")
 print(proventos_totais_informados)
-payout_anual_percentual = proventos_totais_estimados.div(
-    fcl_payout.replace(0, np.nan)
-).mul(100)
-payout_medio_por_empresa = payout_anual_percentual.mean(axis="columns")
 payout_resumo_bayesiano = None
 
 if USAR_PAYOUT_BAYESIANO:
@@ -993,32 +1286,10 @@ if USAR_PAYOUT_BAYESIANO:
 
         # O payout é uma razão positiva e assimétrica: usa-se um modelo
         # log-normal, com prior fraca centrada em 50% (desvio de 1 em log).
-        with pm.Model() as modelo_payout:
-            payout_mu_log = pm.Normal("payout_mu_log", mu=np.log(50.0), sigma=1.0)
-            payout_sigma_log = pm.HalfNormal("payout_sigma_log", sigma=1.0)
-            pm.LogNormal(
-                "payout_anual_observado",
-                mu=payout_mu_log,
-                sigma=payout_sigma_log,
-                observed=observacoes_payout,
-            )
-            # Mediana do payout anual: payout central usado nos resultados.
-            pm.Deterministic("payout_mediano", pt.exp(payout_mu_log))
-            # Média da log-normal: só informativa, é puxada para cima por sigma.
-            pm.Deterministic(
-                "payout_medio",
-                pt.exp(payout_mu_log + payout_sigma_log**2 / 2),
-            )
-            idata_payout = pm.sample(
-                draws=2000,
-                tune=1000,
-                chains=2,
-                cores=1,
-                target_accept=0.93,
-                random_seed=42 + indice_empresa,
-                return_inferencedata=True,
-                progressbar=False,
-            )
+        idata_payout = ajustar_modelo_payout(
+            observacoes=observacoes_payout,
+            random_seed=42 + indice_empresa,
+        )
 
         amostras_mediana_posterior = (
             idata_payout.posterior["payout_mediano"].values.flatten()
@@ -1054,30 +1325,12 @@ if USAR_PAYOUT_BAYESIANO:
             ).replace([np.inf, -np.inf], np.nan).dropna()
             tabela_dep = tabela_dep[(tabela_dep["payout"] > 0) & (tabela_dep["fcl"] > 0)]
             print(f"{empresa}: {len(tabela_dep)} anos usados no modelo de payout dependente.")
-            log_fcl_obs = np.log(tabela_dep["fcl"].to_numpy(dtype=float))
-            centro_log_fcl = float(log_fcl_obs.mean())
-            with pm.Model() as modelo_payout_dep:
-                dep_mu = pm.Normal("dep_mu", mu=np.log(50.0), sigma=1.0)
-                # gamma limitado por prior estreita: gamma < -1 faria o
-                # dividendo explodir quando o FCL tende a zero.
-                dep_gamma = pm.Normal("dep_gamma", mu=0.0, sigma=0.5)
-                dep_sigma = pm.HalfNormal("dep_sigma", sigma=1.0)
-                pm.LogNormal(
-                    "payout_dep_observado",
-                    mu=dep_mu + dep_gamma * (log_fcl_obs - centro_log_fcl),
-                    sigma=dep_sigma,
-                    observed=tabela_dep["payout"].to_numpy(dtype=float),
-                )
-                idata_dep = pm.sample(
-                    draws=2000,
-                    tune=1000,
-                    chains=2,
-                    cores=1,
-                    target_accept=0.93,
-                    random_seed=142 + indice_empresa,
-                    return_inferencedata=True,
-                    progressbar=False,
-                )
+            centro_log_fcl = float(np.log(tabela_dep["fcl"]).mean())
+            idata_dep = ajustar_modelo_payout_dependente(
+                tabela=tabela_dep,
+                indice_empresa=indice_empresa,
+                centro_log_fcl=centro_log_fcl,
+            )
             parametros_payout_dependente[empresa] = (
                 idata_dep.posterior["dep_mu"].values.flatten(),
                 idata_dep.posterior["dep_gamma"].values.flatten(),
@@ -1241,66 +1494,21 @@ print(f"Relatório de payout salvo em: {arquivo_payout}")
 
 if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     ultimo_ano_observado = int(fcl_utilizado.columns.astype(int).max())
-    # Inclui os anos observados: nesses, P10/P50/P90 são a preditiva do modelo.
-    mascara_futuro = anos_projecao <= ano_final_plot
-    anos_dividendos = anos_projecao[mascara_futuro]
-    fcl_futuro_amostras = previsoes_multivariadas[:, mascara_futuro, :]
-    numero_amostras_fcl = fcl_futuro_amostras.shape[0]
-    rng_dividendos = np.random.default_rng(2026)
-
-    dividendos_amostras = np.full(fcl_futuro_amostras.shape, np.nan)
-    for indice_empresa, empresa in enumerate(empresas_multivariadas):
-        if empresa not in parametros_payout_posterior:
-            continue
-        fcl_empresa = np.clip(fcl_futuro_amostras[:, :, indice_empresa], 0, None)
-        formato = fcl_empresa.shape
-        if USAR_PAYOUT_INDEPENDENTE_FCL:
-            mu_log_amostras, sigma_log_amostras = parametros_payout_posterior[empresa]
-            # Alinha o número de draws do payout com o do FCL (independentes).
-            sorteio = rng_dividendos.integers(0, mu_log_amostras.size, numero_amostras_fcl)
-            mu_payout = np.broadcast_to(mu_log_amostras[sorteio][:, None], formato)
-            sigma_payout = np.broadcast_to(sigma_log_amostras[sorteio][:, None], formato)
-        else:
-            mu_dep, gamma_dep, sigma_dep, centro_log_fcl = parametros_payout_dependente[empresa]
-            # Os três parâmetros vêm do mesmo draw da posterior; o payout de
-            # cada ano depende do FCL simulado daquele mesmo ano.
-            sorteio = rng_dividendos.integers(0, mu_dep.size, numero_amostras_fcl)
-            log_fcl_futuro = np.log(np.where(fcl_empresa > 0, fcl_empresa, 1.0))
-            mu_payout = (
-                mu_dep[sorteio][:, None]
-                + gamma_dep[sorteio][:, None] * (log_fcl_futuro - centro_log_fcl)
-            )
-            sigma_payout = np.broadcast_to(sigma_dep[sorteio][:, None], formato)
-        # Um payout novo para cada ano futuro, dados os parâmetros da posterior.
-        payout_futuro_pct = pm.draw(
-            pm.LogNormal.dist(mu=mu_payout, sigma=sigma_payout),
-            random_seed=int(rng_dividendos.integers(1_000_000)),
-        )
-        dividendos_amostras[:, :, indice_empresa] = payout_futuro_pct / 100 * fcl_empresa
-
-    linhas_dividendos = []
-    quantidades_por_empresa = pd.Series(quantidades_acoes, dtype=float)
-    for indice_empresa, empresa in enumerate(empresas_multivariadas):
-        for indice_ano, ano in enumerate(anos_dividendos):
-            amostras = dividendos_amostras[:, indice_ano, indice_empresa]
-            if np.isnan(amostras).all():
-                continue
-            p10, p50, p90 = np.percentile(amostras, [10, 50, 90])
-            acoes_bilhoes = quantidades_por_empresa[empresa] / 1e9
-            linhas_dividendos.append(
-                {
-                    "ticker": empresa,
-                    "ano": int(ano),
-                    "dividendo_media_rs_bi": amostras.mean(),
-                    "dividendo_p10_rs_bi": p10,
-                    "dividendo_p50_rs_bi": p50,
-                    "dividendo_p90_rs_bi": p90,
-                    "dividendo_por_acao_p10": p10 / acoes_bilhoes,
-                    "dividendo_por_acao_p50": p50 / acoes_bilhoes,
-                    "dividendo_por_acao_p90": p90 / acoes_bilhoes,
-                }
-            )
-    relatorio_dividendos = pd.DataFrame(linhas_dividendos)
+    anos_dividendos, dividendos_amostras = simular_dividendos_futuros(
+        anos_projecao=anos_projecao,
+        ano_final=ano_final_plot,
+        previsoes_fcl=previsoes_multivariadas,
+        empresas=empresas_multivariadas,
+        parametros_independentes=parametros_payout_posterior,
+        parametros_dependentes=parametros_payout_dependente,
+        payout_independente=USAR_PAYOUT_INDEPENDENTE_FCL,
+    )
+    relatorio_dividendos = resumir_dividendos(
+        anos_dividendos=anos_dividendos,
+        dividendos_amostras=dividendos_amostras,
+        empresas=empresas_multivariadas,
+        quantidades=quantidades_acoes,
+    )
     sufixo_modo = "independente" if USAR_PAYOUT_INDEPENDENTE_FCL else "dependente"
     arquivo_dividendos = OUTPUT_DIR / f"dividendos_futuros_posterior_{sufixo_modo}.csv"
     relatorio_dividendos.to_csv(arquivo_dividendos, index=False, decimal=",", float_format="%.3f")
@@ -1316,43 +1524,18 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
         axis="columns",
     )
 
-    figura_dividendos, eixos_dividendos = plt.subplots(2, 2, figsize=(14, 8), squeeze=False)
-    for indice_empresa, empresa in enumerate(empresas_multivariadas):
-        eixo = eixos_dividendos.flat[indice_empresa]
-        tabela = relatorio_dividendos[relatorio_dividendos["ticker"] == empresa]
-        if tabela.empty:
-            eixo.set_axis_off()
-            continue
-        historico = dividendos_historicos.loc[empresa].dropna()
-        eixo.scatter(
-            historico.index, historico.to_numpy(), color="black",
-            label="Dividendo observado",
-        )
-        eixo.plot(tabela["ano"], tabela["dividendo_p50_rs_bi"], color="blue",
-                  label="Dividendo mediano")
-        eixo.plot(tabela["ano"], tabela["dividendo_p90_rs_bi"], color="green",
-                  linestyle="--", label="Dividendo P90")
-        eixo.plot(tabela["ano"], tabela["dividendo_p10_rs_bi"], color="red",
-                  linestyle="--", label="Dividendo P10")
-        eixo.axvline(ultimo_ano_observado + 0.5, color="gray", linestyle=":")
-        eixo.set_xlim(ano_inicial - 0.5, ano_final_plot + 0.5)
-        eixo.set_xticks(range(ano_inicial, ano_final_plot + 1, 2))
-        eixo.set_title(f"{empresa} - dividendos até {ano_final_plot}")
-        eixo.set_xlabel("Ano")
-        eixo.set_ylabel(f"R$ bi (preços de {ano_base_fcl})")
-        eixo.grid(alpha=0.3)
-        eixo.legend(fontsize=8, framealpha=0.6)
-    figura_dividendos.suptitle(
-        f"Dividendos totais: observados e P10/mediana/P90 do modelo, "
-        f"{ano_inicial}-{ano_final_plot} (payout {sufixo_modo} do FCL)"
+    plotar_dividendos(
+        relatorio=relatorio_dividendos,
+        dividendos_historicos=dividendos_historicos,
+        empresas=empresas_multivariadas,
+        ano_inicial=ano_inicial,
+        ano_final=ano_final_plot,
+        ultimo_ano_observado=ultimo_ano_observado,
+        ano_base_fcl=ano_base_fcl,
+        modo=sufixo_modo,
+        caminho_saida=FIG_DIR / f"dividendos_todas_{sufixo_modo}.png",
     )
-    figura_dividendos.tight_layout()
-    figura_dividendos.savefig(
-        FIG_DIR / f"dividendos_todas_{sufixo_modo}.png", dpi=200
-    )
-    plt.close(figura_dividendos)
 
     print("\nDividendos futuros (posterior preditiva, R$ bi):")
     print(relatorio_dividendos.round(2).to_string(index=False))
     print(f"Dividendos futuros salvos em: {arquivo_dividendos}")
-
