@@ -27,7 +27,7 @@ anos_projecao = np.arange(ano_inicial, ano_final)
 empresas = ["ITUB3.SA", "FESA4.SA", "EGIE3.SA", "VALE3.SA"]
 empresas_multivariadas = empresas
 USAR_FCL_CORRIGIDO_capex_expandido = True
-USAR_FCL_FUTURO_PROJETADO = False
+USAR_FCL_FUTURO_PROJETADO = True
 USAR_FCL_CORRIGIDO_INPC = True
 USAR_EMPRESAS_MUTLIVARIADAS = True
 USAR_PAYOUT_BAYESIANO = True
@@ -37,7 +37,6 @@ TICKERS_YAHOO_ACOES = {
     "EGIE3.SA": ("EGIE3.SA",),
     "VALE3.SA": ("VALE3.SA",),
 }
-
 
 def buscar_quantidade_acoes_yahoo(tickers):
     quantidades = {}
@@ -954,6 +953,7 @@ if USAR_PAYOUT_BAYESIANO:
     )
     resumos_posteriores = []
     densidades_posteriores = []
+    parametros_payout_posterior = {}
 
     for indice_empresa, empresa in enumerate(empresas):
         eixo = eixos_payout.flat[indice_empresa]
@@ -1032,6 +1032,7 @@ if USAR_PAYOUT_BAYESIANO:
         # incerteza sobre a média.
         mu_log_amostras = idata_payout.posterior["payout_mu_log"].values.flatten()
         sigma_log_amostras = idata_payout.posterior["payout_sigma_log"].values.flatten()
+        parametros_payout_posterior[empresa] = (mu_log_amostras, sigma_log_amostras)
         payout_previsto = np.exp(
             np.random.default_rng(42 + indice_empresa).normal(
                 mu_log_amostras, sigma_log_amostras
@@ -1168,3 +1169,99 @@ print(
 )
 print(relatorio_payout)
 print(f"Relatório de payout salvo em: {arquivo_payout}")
+
+
+#--------------------------------------------------------------
+#inferencia dos dividendos futuros
+#
+# Dividendo(empresa, ano) = payout(empresa, ano) x max(FCL(empresa, ano), 0)
+# Payout e FCL são tratados como independentes: cada amostra de dividendo
+# multiplica uma amostra da preditiva do FCL (modelo multivariado, que mantém
+# a correlação entre empresas) por uma amostra da preditiva do payout
+# (log-normal), propagando a incerteza dos dois fatores.
+# Unidades: R$ bilhões a preços de ano_base_fcl (o FCL do modelo é corrigido
+# pelo INPC; o payout é uma razão e não depende da base de preços).
+
+if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
+    ultimo_ano_observado = int(fcl_utilizado.columns.astype(int).max())
+    mascara_futuro = anos_projecao > ultimo_ano_observado
+    anos_dividendos = anos_projecao[mascara_futuro]
+    fcl_futuro_amostras = previsoes_multivariadas[:, mascara_futuro, :]
+    numero_amostras_fcl = fcl_futuro_amostras.shape[0]
+    rng_dividendos = np.random.default_rng(2026)
+
+    dividendos_amostras = np.full(fcl_futuro_amostras.shape, np.nan)
+    for indice_empresa, empresa in enumerate(empresas_multivariadas):
+        if empresa not in parametros_payout_posterior:
+            continue
+        mu_log_amostras, sigma_log_amostras = parametros_payout_posterior[empresa]
+        # Alinha o número de draws do payout com o do FCL (independentes).
+        sorteio = rng_dividendos.integers(0, mu_log_amostras.size, numero_amostras_fcl)
+        mu_empresa = mu_log_amostras[sorteio][:, None]
+        sigma_empresa = sigma_log_amostras[sorteio][:, None]
+        # Um payout novo para cada ano futuro, dado (mu, sigma) da posterior.
+        payout_futuro_pct = pm.draw(
+            pm.LogNormal.dist(
+                mu=np.broadcast_to(mu_empresa, (numero_amostras_fcl, len(anos_dividendos))),
+                sigma=np.broadcast_to(sigma_empresa, (numero_amostras_fcl, len(anos_dividendos))),
+            ),
+            random_seed=int(rng_dividendos.integers(1_000_000)),
+        )
+        dividendos_amostras[:, :, indice_empresa] = (
+            payout_futuro_pct / 100
+            * np.clip(fcl_futuro_amostras[:, :, indice_empresa], 0, None)
+        )
+
+    linhas_dividendos = []
+    quantidades_por_empresa = pd.Series(quantidades_acoes, dtype=float)
+    for indice_empresa, empresa in enumerate(empresas_multivariadas):
+        for indice_ano, ano in enumerate(anos_dividendos):
+            amostras = dividendos_amostras[:, indice_ano, indice_empresa]
+            if np.isnan(amostras).all():
+                continue
+            p10, p50, p90 = np.percentile(amostras, [10, 50, 90])
+            acoes_bilhoes = quantidades_por_empresa[empresa] / 1e9
+            linhas_dividendos.append(
+                {
+                    "ticker": empresa,
+                    "ano": int(ano),
+                    "dividendo_media_rs_bi": amostras.mean(),
+                    "dividendo_p10_rs_bi": p10,
+                    "dividendo_p50_rs_bi": p50,
+                    "dividendo_p90_rs_bi": p90,
+                    "dividendo_por_acao_p10": p10 / acoes_bilhoes,
+                    "dividendo_por_acao_p50": p50 / acoes_bilhoes,
+                    "dividendo_por_acao_p90": p90 / acoes_bilhoes,
+                }
+            )
+    relatorio_dividendos = pd.DataFrame(linhas_dividendos)
+    arquivo_dividendos = OUTPUT_DIR / "dividendos_futuros_posterior.csv"
+    relatorio_dividendos.to_csv(arquivo_dividendos, index=False, decimal=",", float_format="%.3f")
+
+    figura_dividendos, eixos_dividendos = plt.subplots(
+        len(empresas_multivariadas), 1,
+        figsize=(8, 3.2 * len(empresas_multivariadas)),
+        sharex=True, squeeze=False,
+    )
+    for indice_empresa, empresa in enumerate(empresas_multivariadas):
+        eixo = eixos_dividendos[indice_empresa, 0]
+        tabela = relatorio_dividendos[relatorio_dividendos["ticker"] == empresa]
+        if tabela.empty:
+            eixo.set_axis_off()
+            continue
+        eixo.fill_between(
+            tabela["ano"], tabela["dividendo_p10_rs_bi"], tabela["dividendo_p90_rs_bi"],
+            color="teal", alpha=0.25, label="P10-P90",
+        )
+        eixo.plot(tabela["ano"], tabela["dividendo_p50_rs_bi"], color="teal", label="Mediana")
+        eixo.set_title(f"{empresa} - dividendos futuros (posterior preditiva)")
+        eixo.set_ylabel(f"R$ bi (preços de {ano_base_fcl})")
+        eixo.legend()
+    figura_dividendos.tight_layout()
+    figura_dividendos.savefig(FIG_DIR / "dividendos_futuros_posterior.png", dpi=200)
+    plt.close(figura_dividendos)
+
+    print("\nDividendos futuros (posterior preditiva, R$ bi):")
+    print(relatorio_dividendos.round(2).to_string(index=False))
+    print(f"Dividendos futuros salvos em: {arquivo_dividendos}")
+

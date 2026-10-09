@@ -89,7 +89,13 @@ como o FCL corrigido pelo INPC e os relatórios de payout, ficam em
    modelo multivariado também estima correlações entre os erros das empresas.
 5. Calcula o payout histórico usando proventos, quantidade atual de ações e
    FCL; opcionalmente ajusta um modelo bayesiano para estimar o payout médio.
-6. Salva tabelas em `data_output/` e gráficos em `fig/FCL/`.
+6. Infere os dividendos futuros (2026-2036): multiplica, amostra a amostra,
+   o FCL futuro (preditiva do modelo multivariado) pelo payout de um ano novo
+   (preditiva da log-normal), supondo payout independente do FCL. Resultado
+   em `dividendos_futuros_posterior.csv` (R$ bi e por ação, P10/P50/P90) e no
+   gráfico `dividendos_futuros_posterior.png`; valores a preços do último ano
+   do INPC.
+7. Salva tabelas em `data_output/` e gráficos em `fig/FCL/`.
 
 ### Vocabulário bayesiano em poucas palavras
 
