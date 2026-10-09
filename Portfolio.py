@@ -592,6 +592,11 @@ def valor_presente_dividendos(
                 "vp_por_acao_p90": p90 / acoes_bilhoes,
                 "cotacao": cotacao,
                 "vp_sobre_cotacao_p50": p50 / acoes_bilhoes / cotacao,
+                "prob_vp_maior_cotacao": (
+                    np.mean(amostras / acoes_bilhoes > cotacao)
+                    if np.isfinite(cotacao)
+                    else np.nan
+                ),
             }
         )
     return pd.DataFrame(linhas)
@@ -620,6 +625,9 @@ def plotar_tabela_valor_presente(valor_presente, caminho_saida):
             "VP P90 (R$)": por_acao["vp_por_acao_p90"].map("{:,.2f}".format),
             "VP P50 / Cotação": por_acao["vp_sobre_cotacao_p50"].map(
                 "{:.2f}x".format
+            ),
+            "Prob. VP > Cotação": por_acao["prob_vp_maior_cotacao"].map(
+                "{:.0%}".format
             ),
         }
     )
