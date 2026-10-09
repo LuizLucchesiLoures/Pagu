@@ -30,6 +30,8 @@ def criar_anos_projecao(ano_inicial, ano_final):
 ano_inicial = 2016
 ano_final = 2064
 ano_final_plot = 2064
+TAXA = 0.06 #taxa de juros livre de riscos (real, acima da inflação)
+INFLACAO = 0.04 #inflação anual esperada de longo prazo
 anos_projecao = criar_anos_projecao(ano_inicial, ano_final)
 empresas = ["ITUB3.SA", "FESA4.SA", "EGIE3.SA", "VALE3.SA"]
 empresas_multivariadas = empresas
@@ -520,6 +522,126 @@ def resumir_dividendos(anos_dividendos, dividendos_amostras, empresas, quantidad
                 }
             )
     return pd.DataFrame(linhas)
+
+
+def buscar_cotacoes_yahoo(tickers):
+    """Busca no Yahoo o último fechamento disponível (R$) de cada ticker."""
+    cotacoes = {}
+    for ticker in tickers:
+        try:
+            fechamentos = yf.Ticker(ticker).history(period="5d")["Close"].dropna()
+            cotacoes[ticker] = float(fechamentos.iloc[-1])
+        except Exception as erro:
+            print(f"Não foi possível obter a cotação de {ticker}: {erro}")
+            cotacoes[ticker] = np.nan
+    return pd.Series(cotacoes, dtype=float)
+
+
+def valor_presente_dividendos(
+    anos_dividendos,
+    dividendos_amostras,
+    empresas,
+    quantidades,
+    taxa,
+    ano_base,
+    inflacao,
+    cotacoes,
+):
+    """Desconta os dividendos futuros (anos > ano_base) a valor presente.
+
+    Os dividendos estão a preços do ano_base (reais). Eles são inflacionados
+    por (1 + inflacao)^(t - ano_base) e descontados pela taxa nominal
+    (1 + taxa)(1 + inflacao) - 1, com `taxa` real. A inflação se cancela:
+    o resultado é o mesmo que descontar o fluxo real pela taxa real.
+    O VP é calculado em cada draw da posterior; assim tem média, P10, P50 e
+    P90. Inclui a linha "CARTEIRA" com a soma das empresas (draws somados
+    antes do resumo).
+    """
+    anos = np.asarray(anos_dividendos)
+    futuro = anos > ano_base
+    taxa_nominal = (1 + taxa) * (1 + inflacao) - 1
+    expoente = anos[futuro] - ano_base
+    fatores = ((1 + inflacao) / (1 + taxa_nominal)) ** expoente
+    vp_amostras = np.nansum(
+        dividendos_amostras[:, futuro, :] * fatores[None, :, None], axis=1
+    )
+    com_dados = ~np.isnan(dividendos_amostras).all(axis=(0, 1))
+    quantidades_por_empresa = pd.Series(quantidades, dtype=float)
+
+    linhas = []
+    series = [(e, vp_amostras[:, i], quantidades_por_empresa[e] / 1e9)
+              for i, e in enumerate(empresas) if com_dados[i]]
+    series.append(("CARTEIRA", vp_amostras[:, com_dados].sum(axis=1), np.nan))
+    for nome, amostras, acoes_bilhoes in series:
+        p10, p50, p90 = np.percentile(amostras, [10, 50, 90])
+        cotacao = cotacoes.get(nome, np.nan)
+        linhas.append(
+            {
+                "ticker": nome,
+                "taxa_real": taxa,
+                "inflacao": inflacao,
+                "taxa_nominal": taxa_nominal,
+                "ano_base": ano_base,
+                "ano_final": int(anos[futuro].max()),
+                "vp_media_rs_bi": amostras.mean(),
+                "vp_p10_rs_bi": p10,
+                "vp_p50_rs_bi": p50,
+                "vp_p90_rs_bi": p90,
+                "vp_por_acao_p10": p10 / acoes_bilhoes,
+                "vp_por_acao_p50": p50 / acoes_bilhoes,
+                "vp_por_acao_p90": p90 / acoes_bilhoes,
+                "cotacao": cotacao,
+                "vp_sobre_cotacao_p50": p50 / acoes_bilhoes / cotacao,
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
+def plotar_tabela_valor_presente(valor_presente, caminho_saida):
+    """Salva uma figura com a tabela do valor presente dos dividendos.
+
+    Os parâmetros comuns (taxas, ano-base e ano final) vão no título, numa
+    única linha, em vez de repetidos em colunas.
+    """
+    primeira = valor_presente.iloc[0]
+    titulo = (
+        "Valor presente dos dividendos por ação\n"
+        f"Taxa real {primeira['taxa_real']:.1%} | Inflação {primeira['inflacao']:.1%} | "
+        f"Taxa nominal {primeira['taxa_nominal']:.2%} | "
+        f"Ano-base {int(primeira['ano_base'])} | Ano final {int(primeira['ano_final'])}"
+    )
+    por_acao = valor_presente[valor_presente["ticker"] != "CARTEIRA"]
+    tabela = pd.DataFrame(
+        {
+            "Empresa": por_acao["ticker"].str.replace(".SA", "", regex=False),
+            "Cotação (R$)": por_acao["cotacao"].map("{:,.2f}".format),
+            "VP P10 (R$)": por_acao["vp_por_acao_p10"].map("{:,.2f}".format),
+            "VP P50 (R$)": por_acao["vp_por_acao_p50"].map("{:,.2f}".format),
+            "VP P90 (R$)": por_acao["vp_por_acao_p90"].map("{:,.2f}".format),
+            "VP P50 / Cotação": por_acao["vp_sobre_cotacao_p50"].map(
+                "{:.2f}x".format
+            ),
+        }
+    )
+    figura, eixo = plt.subplots(figsize=(10, 0.6 * len(tabela) + 1.6))
+    eixo.axis("off")
+    desenho = eixo.table(
+        cellText=tabela.values,
+        colLabels=tabela.columns,
+        cellLoc="center",
+        loc="center",
+    )
+    desenho.auto_set_font_size(False)
+    desenho.set_fontsize(11)
+    desenho.scale(1, 1.6)
+    for (linha, _), celula in desenho.get_celld().items():
+        if linha == 0:
+            celula.set_facecolor("#d9e2f3")
+            celula.set_text_props(weight="bold")
+    figura.suptitle(titulo, fontsize=12)
+    figura.tight_layout()
+    figura.savefig(caminho_saida, dpi=200, bbox_inches="tight")
+    plt.close(figura)
 
 
 def plotar_dividendos(
@@ -1539,3 +1661,23 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     print("\nDividendos futuros (posterior preditiva, R$ bi):")
     print(relatorio_dividendos.round(2).to_string(index=False))
     print(f"Dividendos futuros salvos em: {arquivo_dividendos}")
+
+    cotacoes = buscar_cotacoes_yahoo(empresas_multivariadas)
+    valor_presente = valor_presente_dividendos(
+        anos_dividendos=anos_dividendos,
+        dividendos_amostras=dividendos_amostras,
+        empresas=empresas_multivariadas,
+        quantidades=quantidades_acoes,
+        taxa=TAXA,
+        ano_base=ultimo_ano_observado,
+        inflacao=INFLACAO,
+        cotacoes=cotacoes,
+    )
+    arquivo_vp = OUTPUT_DIR / f"valor_presente_dividendos_{sufixo_modo}.csv"
+    valor_presente.to_csv(arquivo_vp, index=False, decimal=",", float_format="%.3f")
+    print(f"\nValor presente dos dividendos (taxa real {TAXA:.1%}, inflação {INFLACAO:.1%}, nominal {(1 + TAXA) * (1 + INFLACAO) - 1:.2%}, base {ultimo_ano_observado}, R$ bi):")
+    print(valor_presente.round(2).to_string(index=False))
+    print(f"Valor presente salvo em: {arquivo_vp}")
+    figura_vp = FIG_DIR / f"valor_presente_dividendos_{sufixo_modo}.png"
+    plotar_tabela_valor_presente(valor_presente, figura_vp)
+    print(f"Tabela do valor presente salva em: {figura_vp}")
