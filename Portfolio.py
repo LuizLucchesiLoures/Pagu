@@ -1241,9 +1241,8 @@ print(f"Relatório de payout salvo em: {arquivo_payout}")
 
 if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     ultimo_ano_observado = int(fcl_utilizado.columns.astype(int).max())
-    mascara_futuro = (anos_projecao > ultimo_ano_observado) & (
-        anos_projecao <= ano_final_plot
-    )
+    # Inclui os anos observados: nesses, P10/P50/P90 são a preditiva do modelo.
+    mascara_futuro = anos_projecao <= ano_final_plot
     anos_dividendos = anos_projecao[mascara_futuro]
     fcl_futuro_amostras = previsoes_multivariadas[:, mascara_futuro, :]
     numero_amostras_fcl = fcl_futuro_amostras.shape[0]
@@ -1325,29 +1324,27 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
             eixo.set_axis_off()
             continue
         historico = dividendos_historicos.loc[empresa].dropna()
-        eixo.bar(
-            historico.index, historico.to_numpy(), color="dimgray", width=0.7,
-            label="Dividendos ocorridos",
+        eixo.scatter(
+            historico.index, historico.to_numpy(), color="black",
+            label="Dividendo observado",
         )
-        eixo.bar(
-            tabela["ano"], tabela["dividendo_p50_rs_bi"], color="teal", width=0.7,
-            label="Mediana inferida",
-        )
-        eixo.plot(tabela["ano"], tabela["dividendo_p90_rs_bi"], color="#009e73",
-                  linestyle="--", marker="o", markersize=3, label="P90")
-        eixo.plot(tabela["ano"], tabela["dividendo_p10_rs_bi"], color="#d55e00",
-                  linestyle="--", marker="o", markersize=3, label="P10")
+        eixo.plot(tabela["ano"], tabela["dividendo_p50_rs_bi"], color="blue",
+                  label="Dividendo mediano")
+        eixo.plot(tabela["ano"], tabela["dividendo_p90_rs_bi"], color="green",
+                  linestyle="--", label="Dividendo P90")
+        eixo.plot(tabela["ano"], tabela["dividendo_p10_rs_bi"], color="red",
+                  linestyle="--", label="Dividendo P10")
         eixo.axvline(ultimo_ano_observado + 0.5, color="gray", linestyle=":")
-        eixo.set_xlim(ano_inicial - 0.7, ano_final_plot + 0.7)
+        eixo.set_xlim(ano_inicial - 0.5, ano_final_plot + 0.5)
         eixo.set_xticks(range(ano_inicial, ano_final_plot + 1, 2))
-        eixo.set_title(empresa)
+        eixo.set_title(f"{empresa} - dividendos até {ano_final_plot}")
         eixo.set_xlabel("Ano")
         eixo.set_ylabel(f"R$ bi (preços de {ano_base_fcl})")
-        eixo.grid(alpha=0.3, axis="y")
-        eixo.legend(loc="upper left", fontsize=8)
+        eixo.grid(alpha=0.3)
+        eixo.legend(fontsize=8, framealpha=0.6)
     figura_dividendos.suptitle(
-        f"Dividendos totais: ocorridos 2016-{ultimo_ano_observado} e inferidos "
-        f"até {ano_final_plot} (payout {sufixo_modo} do FCL)"
+        f"Dividendos totais: observados e P10/mediana/P90 do modelo, "
+        f"{ano_inicial}-{ano_final_plot} (payout {sufixo_modo} do FCL)"
     )
     figura_dividendos.tight_layout()
     figura_dividendos.savefig(
