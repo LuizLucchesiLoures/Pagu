@@ -90,7 +90,7 @@ como o FCL corrigido pelo INPC e os relatórios de payout, ficam em
    modelo multivariado também estima correlações entre os erros das empresas.
 5. Calcula o payout histórico usando proventos, quantidade atual de ações e
    FCL; opcionalmente ajusta um modelo bayesiano para estimar o payout médio.
-6. Infere os dividendos futuros (2026-2036): multiplica, amostra a amostra,
+6. Infere os dividendos futuros: multiplica, amostra a amostra,
    o FCL futuro (preditiva do modelo multivariado) pelo payout de um ano novo
    (preditiva log-normal). A chave `USAR_PAYOUT_INDEPENDENTE_FCL` (início do
    programa) escolhe: `True` = payout independente do FCL; `False` = payout
@@ -98,9 +98,32 @@ como o FCL corrigido pelo INPC e os relatórios de payout, ficam em
    `gamma` estimado por empresa (gamma < 0: FCL menor, payout maior).
    Resultado em `dividendos_futuros_posterior_independente.csv` ou
    `..._dependente.csv` (R$ bi e por ação, P10/P50/P90) e em uma figura com as 4 ações
-   (`fig/FCL/dividendos_todas_<modo>.png`: barras dos dividendos ocorridos
-   2016-2025 e da mediana inferida, com linhas de P10 e P90 até 2035); valores a preços do último ano do INPC.
+   (`fig/FCL/dividendos_todas_<modo>.png`: pontos observados e curvas P10,
+   mediana e P90 ao longo dos anos configurados); valores a preços do último ano do INPC.
 7. Salva tabelas em `data_output/` e gráficos em `fig/FCL/`.
+
+### Como o código está organizado
+
+- `criar_anos_projecao` monta a sequência de anos a partir das opções do
+  início do programa. O ano final é incluído na sequência.
+- `ler_dados_entrada` lê e padroniza os arquivos CSV de FCL, capex, projeções
+  futuras e proventos por ação.
+- `preparar_dados_fcl` aplica o ajuste opcional de capex e calcula a série de
+  FCL corrigida pelo INPC.
+- `buscar_quantidade_acoes_yahoo` e `ler_inpc_anual` cuidam, respectivamente,
+  da consulta de ações e da leitura do INPC.
+- `ajustar_modelo_multivariado` ajusta os parâmetros de FCL e
+  `extrair_amostras_covariancia` recupera as amostras usadas nas previsões.
+- `simular_previsoes_multivariadas` propaga essas amostras para os anos
+  projetados, mantendo a correlação entre empresas.
+- `construir_modelo_bayesiano` ajusta o modelo individual e prepara seus
+  gráficos quando essa opção está selecionada.
+- `calcular_payout_historico`, `ajustar_modelo_payout` e
+  `ajustar_modelo_payout_dependente` preparam os payouts e ajustam os modelos
+  de payout.
+- `simular_dividendos_futuros`, `resumir_dividendos` e `plotar_dividendos`
+  transformam as previsões de FCL e payout em distribuições de dividendos,
+  resumos e gráficos.
 
 ### Vocabulário bayesiano em poucas palavras
 
