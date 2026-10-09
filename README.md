@@ -13,6 +13,7 @@ salva gráficos em `fig/FCL/`.
 ```text
 PAGU/
 ├── Portfolio.py       # programa principal
+├── backtest_dividendos.py  # teste retrospectivo: ajusta até 2022, prevê 2023-2025
 ├── requirements.txt   # bibliotecas Python necessárias
 ├── data_input/        # dados de entrada; não são alterados pelo programa
 ├── data_output/       # tabelas produzidas ao executar o programa
