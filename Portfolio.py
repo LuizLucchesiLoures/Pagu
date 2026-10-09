@@ -623,10 +623,10 @@ def plotar_tabela_valor_presente(valor_presente, caminho_saida):
             "VP P10 (R$)": por_acao["vp_por_acao_p10"].map("{:,.2f}".format),
             "VP P50 (R$)": por_acao["vp_por_acao_p50"].map("{:,.2f}".format),
             "VP P90 (R$)": por_acao["vp_por_acao_p90"].map("{:,.2f}".format),
-            "VP P50 / Cotação": por_acao["vp_sobre_cotacao_p50"].map(
+            "VP/Cotação": por_acao["vp_sobre_cotacao_p50"].map(
                 "{:.2f}x".format
             ),
-            "Prob. VP > Cotação": por_acao["prob_vp_maior_cotacao"].map(
+            "Prob. VP>Cot.": por_acao["prob_vp_maior_cotacao"].map(
                 "{:.0%}".format
             ),
         }
