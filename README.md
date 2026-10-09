@@ -96,9 +96,9 @@ como o FCL corrigido pelo INPC e os relatórios de payout, ficam em
    depende do FCL, com `log(payout) = mu + gamma·(log FCL − centro)` e
    `gamma` estimado por empresa (gamma < 0: FCL menor, payout maior).
    Resultado em `dividendos_futuros_posterior_independente.csv` ou
-   `..._dependente.csv` (R$ bi e por ação, P10/P50/P90) e em um gráfico por ação
-   (`fig/FCL/dividendos_<TICKER>_<modo>.png`: dividendos ocorridos 2016-2025 e
-   P10/mediana/P90 inferidos até 2035); valores a preços do último ano do INPC.
+   `..._dependente.csv` (R$ bi e por ação, P10/P50/P90) e em uma figura com as 4 ações
+   (`fig/FCL/dividendos_todas_<modo>.png`: barras dos dividendos ocorridos
+   2016-2025 e da mediana inferida, com linhas de P10 e P90 até 2035); valores a preços do último ano do INPC.
 7. Salva tabelas em `data_output/` e gráficos em `fig/FCL/`.
 
 ### Vocabulário bayesiano em poucas palavras
