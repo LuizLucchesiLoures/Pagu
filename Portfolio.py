@@ -1241,7 +1241,9 @@ print(f"Relatório de payout salvo em: {arquivo_payout}")
 
 if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     ultimo_ano_observado = int(fcl_utilizado.columns.astype(int).max())
-    mascara_futuro = anos_projecao > ultimo_ano_observado
+    mascara_futuro = (anos_projecao > ultimo_ano_observado) & (
+        anos_projecao <= ano_final_plot
+    )
     anos_dividendos = anos_projecao[mascara_futuro]
     fcl_futuro_amostras = previsoes_multivariadas[:, mascara_futuro, :]
     numero_amostras_fcl = fcl_futuro_amostras.shape[0]
@@ -1304,28 +1306,51 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     arquivo_dividendos = OUTPUT_DIR / f"dividendos_futuros_posterior_{sufixo_modo}.csv"
     relatorio_dividendos.to_csv(arquivo_dividendos, index=False, decimal=",", float_format="%.3f")
 
-    figura_dividendos, eixos_dividendos = plt.subplots(
-        len(empresas_multivariadas), 1,
-        figsize=(8, 3.2 * len(empresas_multivariadas)),
-        sharex=True, squeeze=False,
+    # Dividendos históricos corrigidos pelo INPC para a mesma base de preços
+    # do FCL, para que passado e previsão fiquem comparáveis no mesmo gráfico.
+    fatores_hist = pd.Series(
+        fatores_correcao_inpc.to_numpy(),
+        index=fatores_correcao_inpc.index.astype(int),
     )
-    for indice_empresa, empresa in enumerate(empresas_multivariadas):
-        eixo = eixos_dividendos[indice_empresa, 0]
+    dividendos_historicos = proventos_totais_estimados.mul(
+        fatores_hist.reindex(proventos_totais_estimados.columns.astype(int)).to_numpy(),
+        axis="columns",
+    )
+
+    for empresa in empresas_multivariadas:
         tabela = relatorio_dividendos[relatorio_dividendos["ticker"] == empresa]
         if tabela.empty:
-            eixo.set_axis_off()
             continue
+        historico = dividendos_historicos.loc[empresa].dropna()
+        figura_dividendos, eixo = plt.subplots(figsize=(9, 4.5))
+        eixo.plot(
+            historico.index, historico.to_numpy(), color="black", marker="o",
+            label="Dividendos ocorridos",
+        )
         eixo.fill_between(
             tabela["ano"], tabela["dividendo_p10_rs_bi"], tabela["dividendo_p90_rs_bi"],
-            color="teal", alpha=0.25, label="P10-P90",
+            color="teal", alpha=0.15,
         )
-        eixo.plot(tabela["ano"], tabela["dividendo_p50_rs_bi"], color="teal", label="Mediana")
-        eixo.set_title(f"{empresa} - dividendos futuros (payout {sufixo_modo} do FCL)")
+        eixo.plot(tabela["ano"], tabela["dividendo_p90_rs_bi"], color="#009e73",
+                  linestyle="--", label="P90")
+        eixo.plot(tabela["ano"], tabela["dividendo_p50_rs_bi"], color="teal",
+                  linewidth=2, label="Mediana")
+        eixo.plot(tabela["ano"], tabela["dividendo_p10_rs_bi"], color="#d55e00",
+                  linestyle="--", label="P10")
+        eixo.axvline(ultimo_ano_observado + 0.5, color="gray", linestyle=":")
+        eixo.set_xlim(ano_inicial, ano_final_plot)
+        eixo.set_xticks(range(ano_inicial, ano_final_plot + 1, 2))
+        eixo.set_title(f"{empresa} - dividendos totais (payout {sufixo_modo} do FCL)")
+        eixo.set_xlabel("Ano")
         eixo.set_ylabel(f"R$ bi (preços de {ano_base_fcl})")
+        eixo.grid(alpha=0.3)
         eixo.legend()
-    figura_dividendos.tight_layout()
-    figura_dividendos.savefig(FIG_DIR / f"dividendos_futuros_posterior_{sufixo_modo}.png", dpi=200)
-    plt.close(figura_dividendos)
+        figura_dividendos.tight_layout()
+        figura_dividendos.savefig(
+            FIG_DIR / f"dividendos_{empresa.replace('.SA', '')}_{sufixo_modo}.png",
+            dpi=200,
+        )
+        plt.close(figura_dividendos)
 
     print("\nDividendos futuros (posterior preditiva, R$ bi):")
     print(relatorio_dividendos.round(2).to_string(index=False))
