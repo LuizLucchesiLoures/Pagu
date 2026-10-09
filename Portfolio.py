@@ -31,6 +31,8 @@ USAR_FCL_FUTURO_PROJETADO = True
 USAR_FCL_CORRIGIDO_INPC = True
 USAR_EMPRESAS_MUTLIVARIADAS = True
 USAR_PAYOUT_BAYESIANO = True
+# True: payout independente do FCL; False: log(payout) depende do log(FCL).
+USAR_PAYOUT_INDEPENDENTE_FCL = True
 TICKERS_YAHOO_ACOES = {
     "ITUB3.SA": ("ITUB3.SA", "ITUB4.SA"),
     "FESA4.SA": ("FESA3.SA", "FESA4.SA"),
@@ -954,6 +956,7 @@ if USAR_PAYOUT_BAYESIANO:
     resumos_posteriores = []
     densidades_posteriores = []
     parametros_payout_posterior = {}
+    parametros_payout_dependente = {}
 
     for indice_empresa, empresa in enumerate(empresas):
         eixo = eixos_payout.flat[indice_empresa]
@@ -1033,6 +1036,60 @@ if USAR_PAYOUT_BAYESIANO:
         mu_log_amostras = idata_payout.posterior["payout_mu_log"].values.flatten()
         sigma_log_amostras = idata_payout.posterior["payout_sigma_log"].values.flatten()
         parametros_payout_posterior[empresa] = (mu_log_amostras, sigma_log_amostras)
+
+        if not USAR_PAYOUT_INDEPENDENTE_FCL:
+            # Payout dependente do FCL: log(payout) = mu + gamma*(log FCL - centro).
+            # gamma < 0 indica que o dividendo é "pegajoso": com FCL menor, o
+            # payout sobe. O FCL usado como covariável é o mesmo (em preços
+            # constantes) da preditiva futura.
+            serie_fcl_dep = fcl_utilizado.loc[empresa].astype(float)
+            serie_fcl_dep.index = serie_fcl_dep.index.astype(int)
+            tabela_dep = pd.DataFrame(
+                {
+                    "payout": payout_anual_percentual.loc[empresa],
+                    "fcl": serie_fcl_dep.reindex(
+                        payout_anual_percentual.columns.astype(int)
+                    ).to_numpy(),
+                }
+            ).replace([np.inf, -np.inf], np.nan).dropna()
+            tabela_dep = tabela_dep[(tabela_dep["payout"] > 0) & (tabela_dep["fcl"] > 0)]
+            print(f"{empresa}: {len(tabela_dep)} anos usados no modelo de payout dependente.")
+            log_fcl_obs = np.log(tabela_dep["fcl"].to_numpy(dtype=float))
+            centro_log_fcl = float(log_fcl_obs.mean())
+            with pm.Model() as modelo_payout_dep:
+                dep_mu = pm.Normal("dep_mu", mu=np.log(50.0), sigma=1.0)
+                # gamma limitado por prior estreita: gamma < -1 faria o
+                # dividendo explodir quando o FCL tende a zero.
+                dep_gamma = pm.Normal("dep_gamma", mu=0.0, sigma=0.5)
+                dep_sigma = pm.HalfNormal("dep_sigma", sigma=1.0)
+                pm.LogNormal(
+                    "payout_dep_observado",
+                    mu=dep_mu + dep_gamma * (log_fcl_obs - centro_log_fcl),
+                    sigma=dep_sigma,
+                    observed=tabela_dep["payout"].to_numpy(dtype=float),
+                )
+                idata_dep = pm.sample(
+                    draws=2000,
+                    tune=1000,
+                    chains=2,
+                    cores=1,
+                    target_accept=0.93,
+                    random_seed=142 + indice_empresa,
+                    return_inferencedata=True,
+                    progressbar=False,
+                )
+            parametros_payout_dependente[empresa] = (
+                idata_dep.posterior["dep_mu"].values.flatten(),
+                idata_dep.posterior["dep_gamma"].values.flatten(),
+                idata_dep.posterior["dep_sigma"].values.flatten(),
+                centro_log_fcl,
+            )
+            print(
+                f"{empresa}: gamma (efeito de log FCL no log payout) = "
+                f"{parametros_payout_dependente[empresa][1].mean():.2f} "
+                f"[{np.percentile(parametros_payout_dependente[empresa][1], 5):.2f}, "
+                f"{np.percentile(parametros_payout_dependente[empresa][1], 95):.2f}]"
+            )
         payout_previsto = np.exp(
             np.random.default_rng(42 + indice_empresa).normal(
                 mu_log_amostras, sigma_log_amostras
@@ -1194,23 +1251,31 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     for indice_empresa, empresa in enumerate(empresas_multivariadas):
         if empresa not in parametros_payout_posterior:
             continue
-        mu_log_amostras, sigma_log_amostras = parametros_payout_posterior[empresa]
-        # Alinha o número de draws do payout com o do FCL (independentes).
-        sorteio = rng_dividendos.integers(0, mu_log_amostras.size, numero_amostras_fcl)
-        mu_empresa = mu_log_amostras[sorteio][:, None]
-        sigma_empresa = sigma_log_amostras[sorteio][:, None]
-        # Um payout novo para cada ano futuro, dado (mu, sigma) da posterior.
+        fcl_empresa = np.clip(fcl_futuro_amostras[:, :, indice_empresa], 0, None)
+        formato = fcl_empresa.shape
+        if USAR_PAYOUT_INDEPENDENTE_FCL:
+            mu_log_amostras, sigma_log_amostras = parametros_payout_posterior[empresa]
+            # Alinha o número de draws do payout com o do FCL (independentes).
+            sorteio = rng_dividendos.integers(0, mu_log_amostras.size, numero_amostras_fcl)
+            mu_payout = np.broadcast_to(mu_log_amostras[sorteio][:, None], formato)
+            sigma_payout = np.broadcast_to(sigma_log_amostras[sorteio][:, None], formato)
+        else:
+            mu_dep, gamma_dep, sigma_dep, centro_log_fcl = parametros_payout_dependente[empresa]
+            # Os três parâmetros vêm do mesmo draw da posterior; o payout de
+            # cada ano depende do FCL simulado daquele mesmo ano.
+            sorteio = rng_dividendos.integers(0, mu_dep.size, numero_amostras_fcl)
+            log_fcl_futuro = np.log(np.where(fcl_empresa > 0, fcl_empresa, 1.0))
+            mu_payout = (
+                mu_dep[sorteio][:, None]
+                + gamma_dep[sorteio][:, None] * (log_fcl_futuro - centro_log_fcl)
+            )
+            sigma_payout = np.broadcast_to(sigma_dep[sorteio][:, None], formato)
+        # Um payout novo para cada ano futuro, dados os parâmetros da posterior.
         payout_futuro_pct = pm.draw(
-            pm.LogNormal.dist(
-                mu=np.broadcast_to(mu_empresa, (numero_amostras_fcl, len(anos_dividendos))),
-                sigma=np.broadcast_to(sigma_empresa, (numero_amostras_fcl, len(anos_dividendos))),
-            ),
+            pm.LogNormal.dist(mu=mu_payout, sigma=sigma_payout),
             random_seed=int(rng_dividendos.integers(1_000_000)),
         )
-        dividendos_amostras[:, :, indice_empresa] = (
-            payout_futuro_pct / 100
-            * np.clip(fcl_futuro_amostras[:, :, indice_empresa], 0, None)
-        )
+        dividendos_amostras[:, :, indice_empresa] = payout_futuro_pct / 100 * fcl_empresa
 
     linhas_dividendos = []
     quantidades_por_empresa = pd.Series(quantidades_acoes, dtype=float)
@@ -1235,7 +1300,8 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
                 }
             )
     relatorio_dividendos = pd.DataFrame(linhas_dividendos)
-    arquivo_dividendos = OUTPUT_DIR / "dividendos_futuros_posterior.csv"
+    sufixo_modo = "independente" if USAR_PAYOUT_INDEPENDENTE_FCL else "dependente"
+    arquivo_dividendos = OUTPUT_DIR / f"dividendos_futuros_posterior_{sufixo_modo}.csv"
     relatorio_dividendos.to_csv(arquivo_dividendos, index=False, decimal=",", float_format="%.3f")
 
     figura_dividendos, eixos_dividendos = plt.subplots(
@@ -1254,11 +1320,11 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
             color="teal", alpha=0.25, label="P10-P90",
         )
         eixo.plot(tabela["ano"], tabela["dividendo_p50_rs_bi"], color="teal", label="Mediana")
-        eixo.set_title(f"{empresa} - dividendos futuros (posterior preditiva)")
+        eixo.set_title(f"{empresa} - dividendos futuros (payout {sufixo_modo} do FCL)")
         eixo.set_ylabel(f"R$ bi (preços de {ano_base_fcl})")
         eixo.legend()
     figura_dividendos.tight_layout()
-    figura_dividendos.savefig(FIG_DIR / "dividendos_futuros_posterior.png", dpi=200)
+    figura_dividendos.savefig(FIG_DIR / f"dividendos_futuros_posterior_{sufixo_modo}.png", dpi=200)
     plt.close(figura_dividendos)
 
     print("\nDividendos futuros (posterior preditiva, R$ bi):")

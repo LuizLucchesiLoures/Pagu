@@ -91,10 +91,13 @@ como o FCL corrigido pelo INPC e os relatórios de payout, ficam em
    FCL; opcionalmente ajusta um modelo bayesiano para estimar o payout médio.
 6. Infere os dividendos futuros (2026-2036): multiplica, amostra a amostra,
    o FCL futuro (preditiva do modelo multivariado) pelo payout de um ano novo
-   (preditiva da log-normal), supondo payout independente do FCL. Resultado
-   em `dividendos_futuros_posterior.csv` (R$ bi e por ação, P10/P50/P90) e no
-   gráfico `dividendos_futuros_posterior.png`; valores a preços do último ano
-   do INPC.
+   (preditiva log-normal). A chave `USAR_PAYOUT_INDEPENDENTE_FCL` (início do
+   programa) escolhe: `True` = payout independente do FCL; `False` = payout
+   depende do FCL, com `log(payout) = mu + gamma·(log FCL − centro)` e
+   `gamma` estimado por empresa (gamma < 0: FCL menor, payout maior).
+   Resultado em `dividendos_futuros_posterior_independente.csv` ou
+   `..._dependente.csv` (R$ bi e por ação, P10/P50/P90) e no gráfico
+   correspondente em `fig/FCL/`; valores a preços do último ano do INPC.
 7. Salva tabelas em `data_output/` e gráficos em `fig/FCL/`.
 
 ### Vocabulário bayesiano em poucas palavras
