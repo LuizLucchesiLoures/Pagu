@@ -670,6 +670,34 @@ def comparar_com_carteira(vp_amostras, empresas, quantidades, cotacoes, carteira
     return pd.DataFrame(linhas)
 
 
+def dividendos_anuais_carteira(
+    anos_dividendos, dividendos_amostras, empresas, quantidades, carteira, ano_base
+):
+    """Tabela de dividendos esperados por ativo (linhas) e ano (colunas), em R$.
+
+    Valor = mediana do dividendo por ação × quantidade de ações da sua carteira.
+    Só entram anos depois de `ano_base` e ativos que estão no modelo. A última
+    linha, TOTAL, soma os ativos.
+    """
+    posicao = carteira.set_index("ativo")["quantidade"]
+    anos = np.asarray(anos_dividendos)
+    indices_anos = np.where(anos > ano_base)[0]
+    linhas = {}
+    for i, empresa in enumerate(empresas):
+        ativo = empresa.replace(".SA", "")
+        if ativo not in posicao.index:
+            continue
+        por_acao = (
+            np.nanmedian(dividendos_amostras[:, indices_anos, i], axis=0)
+            / (quantidades[empresa] / 1e9)
+        )
+        linhas[ativo] = por_acao * float(posicao[ativo])
+    tabela = pd.DataFrame(linhas, index=anos[indices_anos].astype(int)).T
+    tabela.index.name = "ativo"
+    tabela.loc["TOTAL"] = tabela.sum()
+    return tabela
+
+
 def plotar_distribuicao_vp(
     vp_amostras,
     empresas,
@@ -1873,15 +1901,30 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     )
     print(f"Ilustração do valor presente salva em: {figura_distribuicao}")
 
+    carteira_planilha = ler_carteira_excel()
     comparacao = comparar_com_carteira(
         vp_amostras=vp_amostras,
         empresas=empresas_multivariadas,
         quantidades=quantidades_acoes,
         cotacoes=cotacoes,
-        carteira=ler_carteira_excel(),
+        carteira=carteira_planilha,
     )
     arquivo_comparacao = OUTPUT_DIR / "comparacao_carteira.csv"
     comparacao.to_csv(arquivo_comparacao, index=False, decimal=",", sep=";", float_format="%.3f")
     print("\nVP do modelo x sua carteira (planilha):")
     print(comparacao.round(2).to_string(index=False))
     print(f"Comparação salva em: {arquivo_comparacao}")
+
+    dividendos_carteira = dividendos_anuais_carteira(
+        anos_dividendos=anos_dividendos,
+        dividendos_amostras=dividendos_amostras,
+        empresas=empresas_multivariadas,
+        quantidades=quantidades_acoes,
+        carteira=carteira_planilha,
+        ano_base=ultimo_ano_observado,
+    )
+    arquivo_div_carteira = OUTPUT_DIR / "dividendos_carteira_por_ano.csv"
+    dividendos_carteira.to_csv(arquivo_div_carteira, sep=";", decimal=",", float_format="%.2f")
+    print("\nDividendos esperados na sua carteira (mediana × quantidade, R$), primeiros anos:")
+    print(dividendos_carteira.iloc[:, :8].round(0).to_string())
+    print(f"Tabela completa salva em: {arquivo_div_carteira}")
