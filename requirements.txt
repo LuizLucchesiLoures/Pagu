@@ -6,3 +6,4 @@ pymc
 pytensor
 scipy
 yfinance
+openpyxl

@@ -12,6 +12,7 @@ from datetime import date
 from urllib.parse import urlencode
 from urllib.request import urlopen
 import json
+from ler_carteira import ler_carteira_excel
 
 matplotlib.use("Agg")
 
@@ -28,8 +29,8 @@ def criar_anos_projecao(ano_inicial, ano_final):
 
 
 ano_inicial = 2016
-ano_final = 2064
-ano_final_plot = 2064
+ano_final = 2036
+ano_final_plot = 2036
 TAXA = 0.06 #taxa de juros livre de riscos (real, acima da inflação)
 INFLACAO = 0.04 #inflação anual esperada de longo prazo
 PROB_ALVO = 0.8 #probabilidade desejada de o VP superar o limiar (define a cotação máxima)
@@ -627,6 +628,123 @@ def valor_presente_dividendos(
             }
         )
     return pd.DataFrame(linhas)
+
+
+def comparar_com_carteira(vp_amostras, empresas, quantidades, cotacoes, carteira):
+    """Compara o VP por ação do modelo com a sua carteira real (planilha).
+
+    Só entram os ativos que estão no modelo. Para cada um calcula: VP por
+    ação (P50), VP/preço médio, probabilidade de o VP superar o preço médio
+    pago, valor investido e VP da posição (VP por ação × suas ações, em R$).
+    """
+    posicao = carteira.set_index("ativo")
+    linhas = []
+    for i, empresa in enumerate(empresas):
+        ativo = empresa.replace(".SA", "")
+        if ativo not in posicao.index:
+            continue
+        dados = posicao.loc[ativo]
+        quantidade = float(dados["quantidade"])
+        preco_medio = float(dados["preco_medio_compra"])
+        vp_acao = vp_amostras[:, i] / (quantidades[empresa] / 1e9)
+        p10, p50, p90 = np.percentile(vp_acao, [10, 50, 90])
+        tem_posicao = quantidade > 0 and preco_medio > 0
+        linhas.append(
+            {
+                "ativo": ativo,
+                "quantidade": quantidade,
+                "preco_medio": preco_medio,
+                "cotacao": cotacoes.get(empresa, np.nan),
+                "vp_acao_p10": p10,
+                "vp_acao_p50": p50,
+                "vp_acao_p90": p90,
+                "vp_sobre_preco_medio": p50 / preco_medio if tem_posicao else np.nan,
+                "prob_vp_maior_preco_medio": (
+                    np.mean(vp_acao > preco_medio) if tem_posicao else np.nan
+                ),
+                "investido_rs": quantidade * preco_medio,
+                "vp_posicao_p50_rs": quantidade * p50,
+                "proventos_recebidos_rs": float(dados["proventos_recebidos"]),
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
+def dividendos_anuais_carteira(
+    anos_dividendos, dividendos_amostras, empresas, quantidades, carteira, ano_base
+):
+    """Tabela de dividendos esperados por ativo (linhas) e ano (colunas), em R$.
+
+    Valor = mediana do dividendo por ação × quantidade de ações da sua carteira.
+    Só entram anos depois de `ano_base` e ativos que estão no modelo. A última
+    linha, TOTAL, soma os ativos.
+    """
+    posicao = carteira.set_index("ativo")["quantidade"]
+    anos = np.asarray(anos_dividendos)
+    indices_anos = np.where(anos > ano_base)[0]
+    linhas = {}
+    for i, empresa in enumerate(empresas):
+        ativo = empresa.replace(".SA", "")
+        if ativo not in posicao.index:
+            continue
+        por_acao = (
+            np.nanmedian(dividendos_amostras[:, indices_anos, i], axis=0)
+            / (quantidades[empresa] / 1e9)
+        )
+        linhas[ativo] = por_acao * float(posicao[ativo])
+    tabela = pd.DataFrame(linhas, index=anos[indices_anos].astype(int)).T
+    tabela.index.name = "ativo"
+    tabela.loc["TOTAL"] = tabela.sum()
+    return tabela
+
+
+def plotar_tabela_dividendos_carteira(tabela, caminho_saida):
+    """Salva uma figura com a tabela de dividendos por ativo e ano (R$ mil)."""
+    texto = (tabela / 1000).map("{:,.1f}".format)
+    texto.columns = [str(c) for c in texto.columns]
+    figura, eixo = plt.subplots(figsize=(0.62 * len(texto.columns) + 2, 0.6 * len(texto) + 1.8))
+    eixo.axis("off")
+    desenho = eixo.table(
+        cellText=texto.values,
+        colLabels=texto.columns,
+        rowLabels=texto.index,
+        cellLoc="center",
+        loc="center",
+    )
+    desenho.auto_set_font_size(False)
+    desenho.set_fontsize(9)
+    desenho.scale(1, 1.6)
+    for (linha, coluna), celula in desenho.get_celld().items():
+        if linha == 0 or coluna == -1:
+            celula.set_facecolor("#d9e2f3")
+            celula.set_text_props(weight="bold")
+        if linha == len(texto):
+            celula.set_text_props(weight="bold")
+    figura.suptitle(
+        "Dividendos esperados na sua carteira por ano (R$ mil, mediana × quantidade, preços de 2025)",
+        fontsize=12,
+    )
+    figura.savefig(caminho_saida, dpi=150, bbox_inches="tight")
+    plt.close(figura)
+
+
+def plotar_dividendos_carteira(tabela, caminho_saida):
+    """Gráfico de dividendos esperados (R$ mil) ao longo do tempo, empilhado por ativo."""
+    por_ativo = tabela.drop(index="TOTAL") / 1000
+    anos = por_ativo.columns.astype(int)
+    figura, eixo = plt.subplots(figsize=(12, 6))
+    eixo.stackplot(anos, por_ativo.values, labels=por_ativo.index, alpha=0.85)
+    eixo.plot(anos, por_ativo.sum(), color="black", linewidth=2, label="TOTAL")
+    eixo.set_xlim(anos.min(), anos.max())
+    eixo.set_ylim(bottom=0)
+    eixo.set_xlabel("Ano")
+    eixo.set_ylabel("Dividendos (R$ mil, preços de 2025)")
+    eixo.set_title("Dividendos esperados na sua carteira (mediana × quantidade)")
+    eixo.grid(alpha=0.3)
+    eixo.legend(loc="lower left", ncol=5)
+    figura.tight_layout()
+    figura.savefig(caminho_saida, dpi=200)
+    plt.close(figura)
 
 
 def plotar_distribuicao_vp(
@@ -1831,3 +1949,37 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
         caminho_saida=figura_distribuicao,
     )
     print(f"Ilustração do valor presente salva em: {figura_distribuicao}")
+
+    carteira_planilha = ler_carteira_excel()
+    comparacao = comparar_com_carteira(
+        vp_amostras=vp_amostras,
+        empresas=empresas_multivariadas,
+        quantidades=quantidades_acoes,
+        cotacoes=cotacoes,
+        carteira=carteira_planilha,
+    )
+    arquivo_comparacao = OUTPUT_DIR / "comparacao_carteira.csv"
+    comparacao.to_csv(arquivo_comparacao, index=False, decimal=",", sep=";", float_format="%.3f")
+    print("\nVP do modelo x sua carteira (planilha):")
+    print(comparacao.round(2).to_string(index=False))
+    print(f"Comparação salva em: {arquivo_comparacao}")
+
+    dividendos_carteira = dividendos_anuais_carteira(
+        anos_dividendos=anos_dividendos,
+        dividendos_amostras=dividendos_amostras,
+        empresas=empresas_multivariadas,
+        quantidades=quantidades_acoes,
+        carteira=carteira_planilha,
+        ano_base=ultimo_ano_observado,
+    )
+    arquivo_div_carteira = OUTPUT_DIR / "dividendos_carteira_por_ano.csv"
+    dividendos_carteira.to_csv(arquivo_div_carteira, sep=";", decimal=",", float_format="%.2f")
+    print("\nDividendos esperados na sua carteira (mediana × quantidade, R$):")
+    print(dividendos_carteira.round(0).to_string())
+    print(f"Tabela completa salva em: {arquivo_div_carteira}")
+    figura_div_carteira = FIG_DIR / "dividendos_carteira_por_ano.png"
+    plotar_tabela_dividendos_carteira(dividendos_carteira, figura_div_carteira)
+    print(f"Figura da tabela salva em: {figura_div_carteira}")
+    grafico_div_carteira = FIG_DIR / "dividendos_carteira_grafico.png"
+    plotar_dividendos_carteira(dividendos_carteira, grafico_div_carteira)
+    print(f"Gráfico dos dividendos da carteira salvo em: {grafico_div_carteira}")
