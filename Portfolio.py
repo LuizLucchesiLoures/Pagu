@@ -637,9 +637,6 @@ def plotar_tabela_valor_presente(valor_presente, caminho_saida):
             "VP P10 (R$)": por_acao["vp_por_acao_p10"].map("{:,.2f}".format),
             "VP P50 (R$)": por_acao["vp_por_acao_p50"].map("{:,.2f}".format),
             "VP P90 (R$)": por_acao["vp_por_acao_p90"].map("{:,.2f}".format),
-            "VP/Cotação": por_acao["vp_sobre_cotacao_p50"].map(
-                "{:.2f}x".format
-            ),
             "Prob. > Limiar": por_acao["prob_vp_maior_fracao"].map(
                 "{:.0%}".format
             ),
@@ -648,7 +645,7 @@ def plotar_tabela_valor_presente(valor_presente, caminho_saida):
             ),
         }
     )
-    figura, eixo = plt.subplots(figsize=(13, 0.6 * len(tabela) + 1.8))
+    figura, eixo = plt.subplots(figsize=(12, 0.6 * len(tabela) + 1.8))
     eixo.axis("off")
     desenho = eixo.table(
         cellText=tabela.values,
