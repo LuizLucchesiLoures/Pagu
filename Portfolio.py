@@ -32,6 +32,7 @@ ano_final = 2064
 ano_final_plot = 2064
 TAXA = 0.06 #taxa de juros livre de riscos (real, acima da inflação)
 INFLACAO = 0.04 #inflação anual esperada de longo prazo
+PROB_ALVO = 0.8 #probabilidade desejada de o VP superar o limiar (define a cotação máxima)
 FRACAO_COTACAO = 0.7 #limiar do VP: fração da cotação atual (1.0 = a própria cotação)
 anos_projecao = criar_anos_projecao(ano_inicial, ano_final)
 empresas = ["ITUB3.SA", "FESA4.SA", "EGIE3.SA", "VALE3.SA"]
@@ -548,6 +549,7 @@ def valor_presente_dividendos(
     inflacao,
     cotacoes,
     fracao_cotacao,
+    prob_alvo,
 ):
     """Desconta os dividendos futuros (anos > ano_base) a valor presente.
 
@@ -595,6 +597,12 @@ def valor_presente_dividendos(
                 "cotacao": cotacao,
                 "vp_sobre_cotacao_p50": p50 / acoes_bilhoes / cotacao,
                 "fracao_cotacao": fracao_cotacao,
+                "prob_alvo": prob_alvo,
+                "cotacao_maxima": (
+                    np.percentile(amostras, 100 * (1 - prob_alvo))
+                    / acoes_bilhoes
+                    / fracao_cotacao
+                ),
                 "prob_vp_maior_fracao": (
                     np.mean(amostras / acoes_bilhoes > fracao_cotacao * cotacao)
                     if np.isfinite(cotacao)
@@ -618,7 +626,8 @@ def plotar_tabela_valor_presente(valor_presente, caminho_saida):
         f"Taxa nominal {primeira['taxa_nominal']:.2%} | "
         f"Ano-base {int(primeira['ano_base'])} | Ano final {int(primeira['ano_final'])}\n"
         f"Limiar = {primeira['fracao_cotacao']:.0%} da cotação "
-        "(Prob. > Limiar = chance de o VP por ação superar o limiar)"
+        "(Prob. > Limiar = chance de o VP por ação superar o limiar)\n"
+        f"Cot. alvo = cotação em que essa probabilidade seria {primeira['prob_alvo']:.0%}"
     )
     por_acao = valor_presente[valor_presente["ticker"] != "CARTEIRA"]
     tabela = pd.DataFrame(
@@ -634,9 +643,12 @@ def plotar_tabela_valor_presente(valor_presente, caminho_saida):
             "Prob. > Limiar": por_acao["prob_vp_maior_fracao"].map(
                 "{:.0%}".format
             ),
+            "Cot. alvo (R$)": por_acao["cotacao_maxima"].map(
+                "{:,.2f}".format
+            ),
         }
     )
-    figura, eixo = plt.subplots(figsize=(10, 0.6 * len(tabela) + 1.6))
+    figura, eixo = plt.subplots(figsize=(13, 0.6 * len(tabela) + 1.8))
     eixo.axis("off")
     desenho = eixo.table(
         cellText=tabela.values,
@@ -1686,6 +1698,7 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
         inflacao=INFLACAO,
         cotacoes=cotacoes,
         fracao_cotacao=FRACAO_COTACAO,
+        prob_alvo=PROB_ALVO,
     )
     arquivo_vp = OUTPUT_DIR / f"valor_presente_dividendos_{sufixo_modo}.csv"
     valor_presente.to_csv(arquivo_vp, index=False, decimal=",", float_format="%.3f")
