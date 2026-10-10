@@ -34,8 +34,14 @@ def ler_carteira_excel(caminho=ARQUIVO, aba=ABA):
     return df.reset_index(drop=True)
 
 
-def plotar_pizza_carteira(carteira, caminho_saida=FIGURA_PIZZA):
-    """Pizza com a composição da carteira (quantidade × preço médio por ativo)."""
+def plotar_pizza_carteira(carteira, caminho_saida=FIGURA_PIZZA, ativos=None):
+    """Pizza com a composição da carteira (quantidade × preço médio por ativo).
+
+    Se `ativos` for informado (tickers com ou sem ".SA"), só eles entram.
+    """
+    if ativos is not None:
+        ativos = [a.replace(".SA", "") for a in ativos]
+        carteira = carteira[carteira["ativo"].isin(ativos)]
     investido = (carteira["quantidade"] * carteira["preco_medio_compra"]).set_axis(carteira["ativo"])
     investido = investido[investido > 0].sort_values(ascending=False)
     figura, eixo = plt.subplots(figsize=(9, 9))

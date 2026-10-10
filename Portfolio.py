@@ -12,7 +12,7 @@ from datetime import date
 from urllib.parse import urlencode
 from urllib.request import urlopen
 import json
-from ler_carteira import ler_carteira_excel
+from ler_carteira import ler_carteira_excel, plotar_pizza_carteira
 
 matplotlib.use("Agg")
 
@@ -1983,3 +1983,7 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     grafico_div_carteira = FIG_DIR / "dividendos_carteira_grafico.png"
     plotar_dividendos_carteira(dividendos_carteira, grafico_div_carteira)
     print(f"Gráfico dos dividendos da carteira salvo em: {grafico_div_carteira}")
+
+    figura_pizza = FIG_DIR / "carteira_pizza_modelo.png"
+    plotar_pizza_carteira(carteira_planilha, figura_pizza, ativos=list(TICKERS_YAHOO_ACOES))
+    print(f"Pizza da carteira (ativos do modelo) salva em: {figura_pizza}")
