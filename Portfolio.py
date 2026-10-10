@@ -29,8 +29,8 @@ def criar_anos_projecao(ano_inicial, ano_final):
 
 
 ano_inicial = 2016
-ano_final = 2064
-ano_final_plot = 2064
+ano_final = 2036
+ano_final_plot = 2036
 TAXA = 0.06 #taxa de juros livre de riscos (real, acima da inflação)
 INFLACAO = 0.04 #inflação anual esperada de longo prazo
 PROB_ALVO = 0.8 #probabilidade desejada de o VP superar o limiar (define a cotação máxima)
@@ -725,6 +725,26 @@ def plotar_tabela_dividendos_carteira(tabela, caminho_saida):
         fontsize=12,
     )
     figura.savefig(caminho_saida, dpi=150, bbox_inches="tight")
+    plt.close(figura)
+
+
+def plotar_dividendos_carteira(tabela, caminho_saida):
+    """Gráfico de dividendos esperados (R$ mil) ao longo do tempo, uma linha por ativo."""
+    por_ativo = tabela.drop(index="TOTAL") / 1000
+    anos = por_ativo.columns.astype(int)
+    figura, eixo = plt.subplots(figsize=(12, 6))
+    for ativo, valores in por_ativo.iterrows():
+        eixo.plot(anos, valores, linewidth=2, marker="o", markersize=3, label=ativo)
+    eixo.plot(anos, por_ativo.sum(), color="black", linewidth=2, linestyle="--", label="TOTAL")
+    eixo.set_xlim(anos.min(), anos.max())
+    eixo.set_ylim(bottom=0)
+    eixo.set_xlabel("Ano")
+    eixo.set_ylabel("Dividendos (R$ mil, preços de 2025)")
+    eixo.set_title("Dividendos esperados na sua carteira (mediana × quantidade)")
+    eixo.grid(alpha=0.3)
+    eixo.legend(loc="lower left", ncol=5)
+    figura.tight_layout()
+    figura.savefig(caminho_saida, dpi=200)
     plt.close(figura)
 
 
@@ -1961,3 +1981,6 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     figura_div_carteira = FIG_DIR / "dividendos_carteira_por_ano.png"
     plotar_tabela_dividendos_carteira(dividendos_carteira, figura_div_carteira)
     print(f"Figura da tabela salva em: {figura_div_carteira}")
+    grafico_div_carteira = FIG_DIR / "dividendos_carteira_grafico.png"
+    plotar_dividendos_carteira(dividendos_carteira, grafico_div_carteira)
+    print(f"Gráfico dos dividendos da carteira salvo em: {grafico_div_carteira}")
