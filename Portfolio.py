@@ -539,6 +539,25 @@ def buscar_cotacoes_yahoo(tickers):
     return pd.Series(cotacoes, dtype=float)
 
 
+def calcular_vp_amostras(anos_dividendos, dividendos_amostras, taxa, ano_base, inflacao):
+    """Valor presente (R$ bi) de cada draw de dividendos, por empresa.
+
+    Os dividendos estão a preços do ano_base (reais). Eles são inflacionados
+    por (1 + inflacao)^(t - ano_base) e descontados pela taxa nominal
+    (1 + taxa)(1 + inflacao) - 1, com `taxa` real. Retorna uma matriz
+    (draws, empresas) e a taxa nominal.
+    """
+    anos = np.asarray(anos_dividendos)
+    futuro = anos > ano_base
+    taxa_nominal = (1 + taxa) * (1 + inflacao) - 1
+    expoente = anos[futuro] - ano_base
+    fatores = ((1 + inflacao) / (1 + taxa_nominal)) ** expoente
+    vp_amostras = np.nansum(
+        dividendos_amostras[:, futuro, :] * fatores[None, :, None], axis=1
+    )
+    return vp_amostras, taxa_nominal
+
+
 def valor_presente_dividendos(
     anos_dividendos,
     dividendos_amostras,
@@ -563,11 +582,8 @@ def valor_presente_dividendos(
     """
     anos = np.asarray(anos_dividendos)
     futuro = anos > ano_base
-    taxa_nominal = (1 + taxa) * (1 + inflacao) - 1
-    expoente = anos[futuro] - ano_base
-    fatores = ((1 + inflacao) / (1 + taxa_nominal)) ** expoente
-    vp_amostras = np.nansum(
-        dividendos_amostras[:, futuro, :] * fatores[None, :, None], axis=1
+    vp_amostras, taxa_nominal = calcular_vp_amostras(
+        anos_dividendos, dividendos_amostras, taxa, ano_base, inflacao
     )
     com_dados = ~np.isnan(dividendos_amostras).all(axis=(0, 1))
     quantidades_por_empresa = pd.Series(quantidades, dtype=float)
@@ -611,6 +627,101 @@ def valor_presente_dividendos(
             }
         )
     return pd.DataFrame(linhas)
+
+
+def plotar_distribuicao_vp(
+    vp_amostras,
+    empresas,
+    quantidades,
+    cotacoes,
+    fracao_cotacao,
+    prob_alvo,
+    caminho_saida,
+):
+    """Ilustra a distribuição do VP por ação de cada empresa contra a cotação.
+
+    O eixo x é o VP por ação dividido pela cotação (1,0 = preço de mercado),
+    o que permite comparar empresas de preços muito diferentes. A densidade é
+    verde onde o VP supera o limiar (fracao_cotacao x cotação) e vermelha
+    abaixo dele. A linha tracejada é a cotação; o losango marca a cotação
+    alvo (onde a probabilidade de superar o limiar seria prob_alvo).
+    """
+    cores = {"ok": "#2a9d63", "ruim": "#d64550", "cotacao": "#1d3557", "alvo": "#f4a300"}
+    quantidades_por_empresa = pd.Series(quantidades, dtype=float)
+    linhas = []
+    for indice, empresa in enumerate(empresas):
+        cotacao = cotacoes.get(empresa, np.nan)
+        amostras = vp_amostras[:, indice]
+        if not np.isfinite(cotacao) or np.all(amostras == 0):
+            continue
+        razao = amostras / (quantidades_por_empresa[empresa] / 1e9) / cotacao
+        linhas.append((empresa.replace(".SA", ""), razao))
+
+    x_max = max(np.percentile(razao, 97) for _, razao in linhas) * 1.05
+    grade = np.linspace(0, x_max, 600)
+    figura, eixo = plt.subplots(figsize=(12, 1.9 * len(linhas) + 1.6))
+    altura = 0.85
+
+    for posicao, (nome, razao) in enumerate(reversed(linhas)):
+        base = posicao
+        densidade = gaussian_kde(razao)(grade)
+        densidade = densidade / densidade.max() * altura
+        acima = grade >= fracao_cotacao
+        eixo.fill_between(grade, base, base + densidade, where=~acima,
+                          color=cores["ruim"], alpha=0.75, linewidth=0)
+        eixo.fill_between(grade, base, base + densidade, where=acima,
+                          color=cores["ok"], alpha=0.75, linewidth=0)
+        eixo.plot(grade, base + densidade, color="white", linewidth=1)
+        eixo.hlines(base, 0, x_max, color="#bbbbbb", linewidth=0.8)
+
+        p10, p50, p90 = np.percentile(razao, [10, 50, 90])
+        alvo = np.percentile(razao, 100 * (1 - prob_alvo)) / fracao_cotacao
+        probabilidade = np.mean(razao > fracao_cotacao)
+        eixo.plot([p10, p90], [base - 0.12] * 2, color="black", linewidth=3,
+                  solid_capstyle="round")
+        eixo.plot(p50, base - 0.12, "o", color="white", markeredgecolor="black",
+                  markersize=8, zorder=5)
+        eixo.plot(alvo, base - 0.12, "D", color=cores["alvo"], markeredgecolor="black",
+                  markersize=9, zorder=6)
+        eixo.text(-0.01 * x_max, base + altura * 0.35, nome, ha="right",
+                  va="center", fontsize=14, fontweight="bold")
+        eixo.text(-0.01 * x_max, base + altura * 0.05,
+                  f"cotação R$ {cotacoes[next(e for e in empresas if e.startswith(nome))]:.2f}",
+                  ha="right", va="center", fontsize=9, color="#555555")
+        eixo.text(x_max, base + altura * 0.8, f"{probabilidade:.0%}", ha="right",
+                  va="center", fontsize=20, fontweight="bold",
+                  color=cores["ok"] if probabilidade >= prob_alvo else cores["ruim"])
+        eixo.text(x_max, base + altura * 0.5, "chance de VP > limiar", ha="right",
+                  va="center", fontsize=8, color="#555555")
+
+    topo = len(linhas) - 0.05 + altura
+    eixo.vlines(1, -0.4, topo, color=cores["cotacao"], linestyle="--", linewidth=1.8)
+    eixo.vlines(fracao_cotacao, -0.4, topo, color=cores["ruim"], linestyle=":",
+                linewidth=1.5)
+    eixo.text(1.02, topo, "cotação (1,0x)", ha="left", va="bottom",
+              color=cores["cotacao"], fontsize=10, fontweight="bold")
+    eixo.text(fracao_cotacao - 0.02, topo, f"limiar ({fracao_cotacao:.1f}x)".replace(".", ","),
+              ha="right", va="bottom", color=cores["ruim"], fontsize=10,
+              fontweight="bold")
+    eixo.set_xlim(0, x_max)
+    eixo.set_ylim(-0.4, topo + 0.3)
+    eixo.set_yticks([])
+    eixo.set_xlabel("VP dos dividendos por ação ÷ cotação atual")
+    for borda in ("top", "right", "left"):
+        eixo.spines[borda].set_visible(False)
+    eixo.set_title(
+        "Quanto valem os dividendos futuros frente ao preço de mercado?",
+        fontsize=14, fontweight="bold", loc="left", pad=26,
+    )
+    eixo.text(
+        0, 1.0,
+        "Barra preta = P10 a P90 | círculo = mediana | ◆ laranja = cotação alvo "
+        f"(chance de {prob_alvo:.0%} de superar o limiar)",
+        transform=eixo.transAxes, ha="left", va="bottom", fontsize=9, color="#555555",
+    )
+    figura.tight_layout()
+    figura.savefig(caminho_saida, dpi=200, bbox_inches="tight")
+    plt.close(figura)
 
 
 def plotar_tabela_valor_presente(valor_presente, caminho_saida):
@@ -1705,3 +1816,18 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     figura_vp = FIG_DIR / f"valor_presente_dividendos_{sufixo_modo}.png"
     plotar_tabela_valor_presente(valor_presente, figura_vp)
     print(f"Tabela do valor presente salva em: {figura_vp}")
+
+    vp_amostras, _ = calcular_vp_amostras(
+        anos_dividendos, dividendos_amostras, TAXA, ultimo_ano_observado, INFLACAO
+    )
+    figura_distribuicao = FIG_DIR / f"valor_presente_distribuicao_{sufixo_modo}.png"
+    plotar_distribuicao_vp(
+        vp_amostras=vp_amostras,
+        empresas=empresas_multivariadas,
+        quantidades=quantidades_acoes,
+        cotacoes=cotacoes,
+        fracao_cotacao=FRACAO_COTACAO,
+        prob_alvo=PROB_ALVO,
+        caminho_saida=figura_distribuicao,
+    )
+    print(f"Ilustração do valor presente salva em: {figura_distribuicao}")
