@@ -12,6 +12,7 @@ from datetime import date
 from urllib.parse import urlencode
 from urllib.request import urlopen
 import json
+from ler_carteira import ler_carteira_excel
 
 matplotlib.use("Agg")
 
@@ -624,6 +625,46 @@ def valor_presente_dividendos(
                     if np.isfinite(cotacao)
                     else np.nan
                 ),
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
+def comparar_com_carteira(vp_amostras, empresas, quantidades, cotacoes, carteira):
+    """Compara o VP por ação do modelo com a sua carteira real (planilha).
+
+    Só entram os ativos que estão no modelo. Para cada um calcula: VP por
+    ação (P50), VP/preço médio, probabilidade de o VP superar o preço médio
+    pago, valor investido e VP da posição (VP por ação × suas ações, em R$).
+    """
+    posicao = carteira.set_index("ativo")
+    linhas = []
+    for i, empresa in enumerate(empresas):
+        ativo = empresa.replace(".SA", "")
+        if ativo not in posicao.index:
+            continue
+        dados = posicao.loc[ativo]
+        quantidade = float(dados["quantidade"])
+        preco_medio = float(dados["preco_medio_compra"])
+        vp_acao = vp_amostras[:, i] / (quantidades[empresa] / 1e9)
+        p10, p50, p90 = np.percentile(vp_acao, [10, 50, 90])
+        tem_posicao = quantidade > 0 and preco_medio > 0
+        linhas.append(
+            {
+                "ativo": ativo,
+                "quantidade": quantidade,
+                "preco_medio": preco_medio,
+                "cotacao": cotacoes.get(empresa, np.nan),
+                "vp_acao_p10": p10,
+                "vp_acao_p50": p50,
+                "vp_acao_p90": p90,
+                "vp_sobre_preco_medio": p50 / preco_medio if tem_posicao else np.nan,
+                "prob_vp_maior_preco_medio": (
+                    np.mean(vp_acao > preco_medio) if tem_posicao else np.nan
+                ),
+                "investido_rs": quantidade * preco_medio,
+                "vp_posicao_p50_rs": quantidade * p50,
+                "proventos_recebidos_rs": float(dados["proventos_recebidos"]),
             }
         )
     return pd.DataFrame(linhas)
@@ -1831,3 +1872,16 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
         caminho_saida=figura_distribuicao,
     )
     print(f"Ilustração do valor presente salva em: {figura_distribuicao}")
+
+    comparacao = comparar_com_carteira(
+        vp_amostras=vp_amostras,
+        empresas=empresas_multivariadas,
+        quantidades=quantidades_acoes,
+        cotacoes=cotacoes,
+        carteira=ler_carteira_excel(),
+    )
+    arquivo_comparacao = OUTPUT_DIR / "comparacao_carteira.csv"
+    comparacao.to_csv(arquivo_comparacao, index=False, decimal=",", sep=";", float_format="%.3f")
+    print("\nVP do modelo x sua carteira (planilha):")
+    print(comparacao.round(2).to_string(index=False))
+    print(f"Comparação salva em: {arquivo_comparacao}")

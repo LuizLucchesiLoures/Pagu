@@ -14,6 +14,8 @@ COLUNAS = {
     "C": "preco_medio_compra",
     "J": "proventos_recebidos",
 }
+# Nomes da planilha que não são o ticker completo
+APELIDOS = {"VALE": "VALE3"}
 SAIDA = BASE / "data_output" / "carteira_lida.csv"
 
 
@@ -26,6 +28,7 @@ def ler_carteira_excel(caminho=ARQUIVO, aba=ABA):
             dados[nome].append(ws[f"{col}{linha}"].value)
     df = pd.DataFrame(dados).dropna(subset=["ativo"])
     df["ativo"] = df["ativo"].astype(str).str.strip().str.upper()
+    df["ativo"] = df["ativo"].replace(APELIDOS)
     return df.reset_index(drop=True)
 
 
