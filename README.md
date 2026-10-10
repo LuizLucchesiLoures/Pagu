@@ -221,3 +221,11 @@ git commit -m "Organiza projeto de análise de carteira"
 
 Para publicar no GitHub, crie um repositório vazio e configure a URL fornecida
 pelo GitHub como `origin` antes de enviar os commits. Não envie `.venv/`, resultados gerados nem dados privados.
+
+## Dashboard
+
+`dashboard.py` junta tudo em uma página HTML (`data_output/dashboard.html`, não versionada, pois tem dados pessoais): cartões-resumo, tabelas ordenáveis, gráficos e abas Carteira, Dividendos, Valor presente e Modelo. Não recalcula nada; rode antes `Portfolio.py` e `ler_carteira.py`.
+
+```bash
+.venv/bin/python dashboard.py   # depois abra data_output/dashboard.html no navegador
+```
