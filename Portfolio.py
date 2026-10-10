@@ -729,13 +729,12 @@ def plotar_tabela_dividendos_carteira(tabela, caminho_saida):
 
 
 def plotar_dividendos_carteira(tabela, caminho_saida):
-    """Gráfico de dividendos esperados (R$ mil) ao longo do tempo, uma linha por ativo."""
+    """Gráfico de dividendos esperados (R$ mil) ao longo do tempo, empilhado por ativo."""
     por_ativo = tabela.drop(index="TOTAL") / 1000
     anos = por_ativo.columns.astype(int)
     figura, eixo = plt.subplots(figsize=(12, 6))
-    for ativo, valores in por_ativo.iterrows():
-        eixo.plot(anos, valores, linewidth=2, marker="o", markersize=3, label=ativo)
-    eixo.plot(anos, por_ativo.sum(), color="black", linewidth=2, linestyle="--", label="TOTAL")
+    eixo.stackplot(anos, por_ativo.values, labels=por_ativo.index, alpha=0.85)
+    eixo.plot(anos, por_ativo.sum(), color="black", linewidth=2, label="TOTAL")
     eixo.set_xlim(anos.min(), anos.max())
     eixo.set_ylim(bottom=0)
     eixo.set_xlabel("Ano")
