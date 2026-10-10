@@ -698,6 +698,36 @@ def dividendos_anuais_carteira(
     return tabela
 
 
+def plotar_tabela_dividendos_carteira(tabela, caminho_saida):
+    """Salva uma figura com a tabela de dividendos por ativo e ano (R$ mil)."""
+    texto = (tabela / 1000).map("{:,.1f}".format)
+    texto.columns = [str(c) for c in texto.columns]
+    figura, eixo = plt.subplots(figsize=(0.62 * len(texto.columns) + 2, 0.6 * len(texto) + 1.8))
+    eixo.axis("off")
+    desenho = eixo.table(
+        cellText=texto.values,
+        colLabels=texto.columns,
+        rowLabels=texto.index,
+        cellLoc="center",
+        loc="center",
+    )
+    desenho.auto_set_font_size(False)
+    desenho.set_fontsize(9)
+    desenho.scale(1, 1.6)
+    for (linha, coluna), celula in desenho.get_celld().items():
+        if linha == 0 or coluna == -1:
+            celula.set_facecolor("#d9e2f3")
+            celula.set_text_props(weight="bold")
+        if linha == len(texto):
+            celula.set_text_props(weight="bold")
+    figura.suptitle(
+        "Dividendos esperados na sua carteira por ano (R$ mil, mediana × quantidade, preços de 2025)",
+        fontsize=12,
+    )
+    figura.savefig(caminho_saida, dpi=150, bbox_inches="tight")
+    plt.close(figura)
+
+
 def plotar_distribuicao_vp(
     vp_amostras,
     empresas,
@@ -1925,6 +1955,9 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     )
     arquivo_div_carteira = OUTPUT_DIR / "dividendos_carteira_por_ano.csv"
     dividendos_carteira.to_csv(arquivo_div_carteira, sep=";", decimal=",", float_format="%.2f")
-    print("\nDividendos esperados na sua carteira (mediana × quantidade, R$), primeiros anos:")
-    print(dividendos_carteira.iloc[:, :8].round(0).to_string())
+    print("\nDividendos esperados na sua carteira (mediana × quantidade, R$):")
+    print(dividendos_carteira.round(0).to_string())
     print(f"Tabela completa salva em: {arquivo_div_carteira}")
+    figura_div_carteira = FIG_DIR / "dividendos_carteira_por_ano.png"
+    plotar_tabela_dividendos_carteira(dividendos_carteira, figura_div_carteira)
+    print(f"Figura da tabela salva em: {figura_div_carteira}")
