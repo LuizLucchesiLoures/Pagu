@@ -32,6 +32,7 @@ ano_final = 2064
 ano_final_plot = 2064
 TAXA = 0.06 #taxa de juros livre de riscos (real, acima da inflação)
 INFLACAO = 0.04 #inflação anual esperada de longo prazo
+FRACAO_COTACAO = 0.7 #limiar do VP: fração da cotação atual (1.0 = a própria cotação)
 anos_projecao = criar_anos_projecao(ano_inicial, ano_final)
 empresas = ["ITUB3.SA", "FESA4.SA", "EGIE3.SA", "VALE3.SA"]
 empresas_multivariadas = empresas
@@ -546,6 +547,7 @@ def valor_presente_dividendos(
     ano_base,
     inflacao,
     cotacoes,
+    fracao_cotacao,
 ):
     """Desconta os dividendos futuros (anos > ano_base) a valor presente.
 
@@ -592,8 +594,9 @@ def valor_presente_dividendos(
                 "vp_por_acao_p90": p90 / acoes_bilhoes,
                 "cotacao": cotacao,
                 "vp_sobre_cotacao_p50": p50 / acoes_bilhoes / cotacao,
-                "prob_vp_maior_cotacao": (
-                    np.mean(amostras / acoes_bilhoes > cotacao)
+                "fracao_cotacao": fracao_cotacao,
+                "prob_vp_maior_fracao": (
+                    np.mean(amostras / acoes_bilhoes > fracao_cotacao * cotacao)
                     if np.isfinite(cotacao)
                     else np.nan
                 ),
@@ -613,7 +616,9 @@ def plotar_tabela_valor_presente(valor_presente, caminho_saida):
         "Valor presente dos dividendos por ação\n"
         f"Taxa real {primeira['taxa_real']:.1%} | Inflação {primeira['inflacao']:.1%} | "
         f"Taxa nominal {primeira['taxa_nominal']:.2%} | "
-        f"Ano-base {int(primeira['ano_base'])} | Ano final {int(primeira['ano_final'])}"
+        f"Ano-base {int(primeira['ano_base'])} | Ano final {int(primeira['ano_final'])}\n"
+        f"Limiar = {primeira['fracao_cotacao']:.0%} da cotação "
+        "(Prob. > Limiar = chance de o VP por ação superar o limiar)"
     )
     por_acao = valor_presente[valor_presente["ticker"] != "CARTEIRA"]
     tabela = pd.DataFrame(
@@ -626,7 +631,7 @@ def plotar_tabela_valor_presente(valor_presente, caminho_saida):
             "VP/Cotação": por_acao["vp_sobre_cotacao_p50"].map(
                 "{:.2f}x".format
             ),
-            "Prob. VP>Cot.": por_acao["prob_vp_maior_cotacao"].map(
+            "Prob. > Limiar": por_acao["prob_vp_maior_fracao"].map(
                 "{:.0%}".format
             ),
         }
@@ -1680,6 +1685,7 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
         ano_base=ultimo_ano_observado,
         inflacao=INFLACAO,
         cotacoes=cotacoes,
+        fracao_cotacao=FRACAO_COTACAO,
     )
     arquivo_vp = OUTPUT_DIR / f"valor_presente_dividendos_{sufixo_modo}.csv"
     valor_presente.to_csv(arquivo_vp, index=False, decimal=",", float_format="%.3f")
