@@ -12,7 +12,7 @@ from datetime import date
 from urllib.parse import urlencode
 from urllib.request import urlopen
 import json
-from ler_carteira import ler_carteira_excel, plotar_pizza_carteira
+from ler_carteira import buscar_cotacoes_yahoo, ler_carteira_excel, plotar_pizza_carteira
 
 matplotlib.use("Agg")
 
@@ -526,19 +526,6 @@ def resumir_dividendos(anos_dividendos, dividendos_amostras, empresas, quantidad
                 }
             )
     return pd.DataFrame(linhas)
-
-
-def buscar_cotacoes_yahoo(tickers):
-    """Busca no Yahoo o último fechamento disponível (R$) de cada ticker."""
-    cotacoes = {}
-    for ticker in tickers:
-        try:
-            fechamentos = yf.Ticker(ticker).history(period="5d")["Close"].dropna()
-            cotacoes[ticker] = float(fechamentos.iloc[-1])
-        except Exception as erro:
-            print(f"Não foi possível obter a cotação de {ticker}: {erro}")
-            cotacoes[ticker] = np.nan
-    return pd.Series(cotacoes, dtype=float)
 
 
 def calcular_vp_amostras(anos_dividendos, dividendos_amostras, taxa, ano_base, inflacao):
