@@ -36,8 +36,6 @@ INFLACAO = 0.04 #inflação anual esperada de longo prazo
 PROB_ALVO = 0.8 #probabilidade desejada de o VP superar o limiar (define a cotação máxima)
 FRACAO_COTACAO = 0.7 #limiar do VP: fração da cotação atual (1.0 = a própria cotação)
 anos_projecao = criar_anos_projecao(ano_inicial, ano_final)
-empresas = ["ITUB3.SA", "FESA4.SA", "EGIE3.SA", "VALE3.SA"]
-empresas_multivariadas = empresas
 USAR_FCL_CORRIGIDO_capex_expandido = True
 USAR_FCL_FUTURO_PROJETADO = True
 USAR_FCL_CORRIGIDO_INPC = True
@@ -51,6 +49,9 @@ TICKERS_YAHOO_ACOES = {
     "EGIE3.SA": ("EGIE3.SA",),
     "VALE3.SA": ("VALE3.SA",),
 }
+# Lista única de ativos: define as empresas de toda a análise.
+empresas = list(TICKERS_YAHOO_ACOES)
+empresas_multivariadas = empresas
 def buscar_quantidade_acoes_yahoo(tickers):
     """Consulta no Yahoo Finance as quantidades de ações dos tickers."""
     quantidades = {}
@@ -641,7 +642,7 @@ def comparar_com_carteira(vp_amostras, empresas, quantidades, cotacoes, carteira
     linhas = []
     for i, empresa in enumerate(empresas):
         ativo = empresa.replace(".SA", "")
-        if ativo not in posicao.index:
+        if ativo not in posicao.index or not np.any(vp_amostras[:, i]):
             continue
         dados = posicao.loc[ativo]
         quantidade = float(dados["quantidade"])
@@ -686,6 +687,10 @@ def dividendos_anuais_carteira(
     for i, empresa in enumerate(empresas):
         ativo = empresa.replace(".SA", "")
         if ativo not in posicao.index:
+            print(f"Aviso: {ativo} não está na planilha da carteira; ignorado na tabela.")
+            continue
+        if np.isnan(dividendos_amostras[:, indices_anos, i]).all():
+            print(f"Aviso: {ativo} sem dados no modelo (falta histórico em data_input); ignorado.")
             continue
         por_acao = (
             np.nanmedian(dividendos_amostras[:, indices_anos, i], axis=0)
@@ -907,7 +912,10 @@ def plotar_dividendos(
     caminho_saida,
 ):
     """Desenha observações históricas e a preditiva de dividendos P10/P50/P90."""
-    figura, eixos = plt.subplots(2, 2, figsize=(14, 8), squeeze=False)
+    linhas_grade = int(np.ceil(len(empresas) / 2))
+    figura, eixos = plt.subplots(
+        linhas_grade, 2, figsize=(14, 4 * linhas_grade), squeeze=False
+    )
     for indice_empresa, empresa in enumerate(empresas):
         eixo = eixos.flat[indice_empresa]
         tabela = relatorio[relatorio["ticker"] == empresa]
@@ -941,6 +949,8 @@ def plotar_dividendos(
         eixo.grid(alpha=0.3)
         eixo.legend(fontsize=8, framealpha=0.6)
 
+    for eixo_vazio in eixos.flat[len(empresas):]:
+        eixo_vazio.set_axis_off()
     figura.suptitle(
         f"Dividendos totais: observados e P10/mediana/P90 do modelo, "
         f"{ano_inicial}-{ano_final} (payout {modo} do FCL)"
@@ -1613,10 +1623,11 @@ print(proventos_totais_informados)
 payout_resumo_bayesiano = None
 
 if USAR_PAYOUT_BAYESIANO:
+    linhas_payout = int(np.ceil(len(empresas) / 2))
     figura_payout, eixos_payout = plt.subplots(
+        linhas_payout,
         2,
-        2,
-        figsize=(12, 8),
+        figsize=(12, 4 * linhas_payout),
         squeeze=False,
     )
     resumos_posteriores = []
@@ -1795,6 +1806,8 @@ if USAR_PAYOUT_BAYESIANO:
             )
         )
 
+    for eixo_vazio in eixos_payout.flat[len(empresas):]:
+        eixo_vazio.set_axis_off()
     figura_payout.suptitle(
         "Densidade posterior do payout mediano, 2016-2025",
         fontsize=14,
