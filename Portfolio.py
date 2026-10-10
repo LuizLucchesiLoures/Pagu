@@ -29,8 +29,8 @@ def criar_anos_projecao(ano_inicial, ano_final):
 
 
 ano_inicial = 2016
-ano_final = 2036
-ano_final_plot = 2036
+ano_final = 2064
+ano_final_plot = 2064
 TAXA = 0.06 #taxa de juros livre de riscos (real, acima da inflação)
 INFLACAO = 0.04 #inflação anual esperada de longo prazo
 PROB_ALVO = 0.8 #probabilidade desejada de o VP superar o limiar (define a cotação máxima)

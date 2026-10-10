@@ -13,6 +13,7 @@ salva gráficos em `fig/FCL/`.
 ```text
 PAGU/
 ├── Portfolio.py       # programa principal
+├── ler_carteira.py   # lê a planilha da carteira, resume lucro e faz a pizza
 ├── backtest_dividendos.py  # teste retrospectivo: ajusta até 2022, prevê 2023-2025
 ├── requirements.txt   # bibliotecas Python necessárias
 ├── data_input/        # dados de entrada; não são alterados pelo programa
@@ -65,6 +66,7 @@ O programa espera estes arquivos dentro de `data_input/`:
 | `proventos.csv` | proventos anuais por ação |
 | `proventos_totais.csv` | dividendo total pago por ano, em R$ bilhões (opcional; colunas separadas por espaço ou Tab; `NaN` = usa proventos por ação × ações atuais) |
 | `INPC_anual.csv` | INPC anual local, usado como alternativa à API |
+| `Carteira.xlsx` | sua planilha pessoal (aba `ACOES III`); só as células B5:B20 (ativo), C5:C20 (preço médio), E5:E20 (quantidade) e J5:J20 (proventos recebidos) são lidas. Não vai para o GitHub (está no `.gitignore`) |
 
 Os quatro primeiros arquivos usam colunas separadas por tabulação. `FCL.csv` e
 `Capex_Expancao.csv` usam vírgula como separador decimal; os valores de
@@ -100,7 +102,32 @@ como o FCL corrigido pelo INPC e os relatórios de payout, ficam em
    `..._dependente.csv` (R$ bi e por ação, P10/P50/P90) e em uma figura com as 4 ações
    (`fig/FCL/dividendos_todas_<modo>.png`: pontos observados e curvas P10,
    mediana e P90 ao longo dos anos configurados); valores a preços do último ano do INPC.
-7. Salva tabelas em `data_output/` e gráficos em `fig/FCL/`.
+7. Desconta os dividendos futuros a valor presente (VP) com a taxa real
+   `TAXA` e a inflação `INFLACAO`, busca as cotações no Yahoo e calcula, por
+   ação, o VP (P10/P50/P90), a probabilidade de o VP superar
+   `FRACAO_COTACAO` × cotação e a cotação-alvo para `PROB_ALVO`. Gera a tabela
+   `valor_presente_dividendos_<modo>.png` e a ilustração
+   `valor_presente_distribuicao_<modo>.png`.
+8. Cruza o modelo com a sua carteira (`Carteira.xlsx`): compara o VP por ação
+   com o seu preço médio (`comparacao_carteira.csv`) e calcula os dividendos
+   esperados por ativo e ano, mediana × quantidade
+   (`dividendos_carteira_por_ano.csv`, tabela e gráfico empilhado
+   `dividendos_carteira_grafico.png`), além da pizza dos ativos do modelo.
+9. Salva tabelas em `data_output/` e gráficos em `fig/FCL/`.
+
+### Resumo da carteira (`ler_carteira.py`)
+
+Roda sozinho, em segundos e sem o modelo bayesiano:
+
+```bash
+.venv/bin/python ler_carteira.py
+```
+
+Gera `data_output/carteira_lida.csv`, `data_output/resumo_carteira.csv`,
+`fig/carteira_pizza.png` e `fig/resumo_carteira.png` (por ativo: quantidade,
+preço médio, cotação, investido, valor atual, lucro, dividendos e lucro com
+dividendos, em R$ e em %). O dicionário `APELIDOS` converte nomes da planilha
+em tickers do Yahoo (por exemplo `GRO` → `GROP31`).
 
 ### Como o código está organizado
 
@@ -124,6 +151,13 @@ como o FCL corrigido pelo INPC e os relatórios de payout, ficam em
 - `simular_dividendos_futuros`, `resumir_dividendos` e `plotar_dividendos`
   transformam as previsões de FCL e payout em distribuições de dividendos,
   resumos e gráficos.
+- `calcular_vp_amostras`, `valor_presente_dividendos`,
+  `plotar_tabela_valor_presente` e `plotar_distribuicao_vp` calculam e
+  ilustram o valor presente e as probabilidades.
+- `comparar_com_carteira`, `dividendos_anuais_carteira`,
+  `plotar_tabela_dividendos_carteira` e `plotar_dividendos_carteira` ligam o
+  modelo à sua carteira. `ler_carteira_excel`, `buscar_cotacoes_yahoo`,
+  `resumir_carteira` e `plotar_pizza_carteira` ficam em `ler_carteira.py`.
 
 ### Vocabulário bayesiano em poucas palavras
 
@@ -154,8 +188,19 @@ No início de `Portfolio.py` existem opções que controlam a análise:
   entre empresas.
 - `USAR_PAYOUT_BAYESIANO`: estima o payout médio com um modelo bayesiano.
 
-`True` liga a opção e `False` desliga. O número de empresas e os anos da
-análise também são configurados no início do arquivo.
+`True` liga a opção e `False` desliga. Também no início do arquivo:
+
+- `ano_inicial` e `ano_final`: período da análise (o padrão vai até 2064).
+- `TAXA` (taxa **real** de desconto) e `INFLACAO`: só a `TAXA` altera o VP.
+- `FRACAO_COTACAO` e `PROB_ALVO`: limiar do VP (fração da cotação) e
+  probabilidade desejada; são valores de exemplo, ajuste ao seu critério.
+- `TICKERS_YAHOO_ACOES`: **lista única de ativos** da análise. As empresas de
+  todo o programa saem das suas chaves. Para incluir um ativo, acrescente uma
+  linha e preencha os dados dele em `data_input/` (FCL, capex, projeções e
+  proventos). Se faltar histórico, o programa avisa e deixa o ativo de fora
+  das tabelas da carteira.
+
+Os resultados são estimativas de um modelo, não recomendação de investimento.
 
 ## Git e repositório remoto
 
