@@ -664,12 +664,12 @@ def dividendos_anuais_carteira(
     """Tabela de dividendos esperados por ativo (linhas) e ano (colunas), em R$.
 
     Valor = mediana do dividendo por ação × quantidade de ações da sua carteira.
-    Só entram anos depois de `ano_base` e ativos que estão no modelo. A última
+    Entram o `ano_base` (último ano observado) e os seguintes, e só ativos que estão no modelo. A última
     linha, TOTAL, soma os ativos.
     """
     posicao = carteira.set_index("ativo")["quantidade"]
     anos = np.asarray(anos_dividendos)
-    indices_anos = np.where(anos > ano_base)[0]
+    indices_anos = np.where(anos >= ano_base)[0]
     linhas = {}
     for i, empresa in enumerate(empresas):
         ativo = empresa.replace(".SA", "")
