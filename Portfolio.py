@@ -12,7 +12,12 @@ from datetime import date
 from urllib.parse import urlencode
 from urllib.request import urlopen
 import json
-from ler_carteira import buscar_cotacoes_yahoo, ler_carteira_excel, plotar_pizza_carteira
+from ler_carteira import (
+    buscar_cotacoes_yahoo,
+    gerar_grafico_legacy,
+    ler_carteira_excel,
+    plotar_pizza_carteira,
+)
 
 matplotlib.use("Agg")
 

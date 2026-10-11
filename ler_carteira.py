@@ -55,16 +55,19 @@ def ler_estimativa_legacy(caminho=ARQUIVO, aba=ABA, linhas=LEGACY_LINHAS):
     return df.reset_index(drop=True)
 
 
-def plotar_legacy(legacy, modelo=None, realizado=None, caminho_saida=FIGURA_LEGACY):
+def plotar_legacy(legacy, modelo=None, realizado=None, caminho_saida=FIGURA_LEGACY, ano_final=None):
     """Barras por ano (R$ mil): Legacy (planilha), modelo e proventos realizados.
 
-    `modelo` e `realizado` são Series indexadas por ano.
+    `modelo` e `realizado` são Series indexadas por ano. Se `ano_final` for
+    informado, os anos posteriores não aparecem.
     """
     series = [("Legacy (planilha)", legacy.set_index("ano")["dividendos_legacy"], "#2f5597")]
     if modelo is not None:
         series.append(("Modelo bayesiano (mediana)", modelo.set_axis(modelo.index.astype(int)), "#e67e22"))
     if realizado is not None:
         series.append(("Realizado (dividendos + juros)", realizado, "#2e8b57"))
+    if ano_final is not None:
+        series = [(n, sr[sr.index <= ano_final], c) for n, sr, c in series]
     largura = 0.8 / len(series)
     figura, eixo = plt.subplots(figsize=(13, 6))
     for i, (nome, serie, cor) in enumerate(series):
@@ -104,6 +107,20 @@ def ler_resumo_anual(caminho=ARQUIVO, aba=ABA_RESUMO, intervalo=INTERVALO_RESUMO
     df = pd.DataFrame(itens, columns=cabecalho).set_index("item")
     df = df.apply(lambda col: pd.to_numeric(col.map(lambda v: np.nan if isinstance(v, str) else v)))
     return df
+
+
+def gerar_grafico_legacy(ano_final=None):
+    """Lê os CSVs já gerados (Legacy, modelo e realizado) e salva o gráfico de barras."""
+    legacy = pd.read_csv(SAIDA_LEGACY, sep=";", decimal=",")
+    arquivo_modelo = BASE / "data_output" / "dividendos_carteira_por_ano.csv"
+    modelo = None
+    if arquivo_modelo.exists():
+        modelo = pd.read_csv(arquivo_modelo, sep=";", decimal=",", index_col=0).loc["TOTAL"]
+    anual = pd.read_csv(SAIDA_RESUMO_ANUAL, sep=";", decimal=",", index_col=0)
+    realizado = anual.loc["dividendos", ["2025", "2026"]] + anual.loc["juros", ["2025", "2026"]]
+    realizado.index = realizado.index.astype(int)
+    plotar_legacy(legacy, modelo, realizado, ano_final=ano_final)
+    print(f"Gráfico Legacy salvo em {FIGURA_LEGACY}")
 
 
 def buscar_cotacoes_yahoo(tickers):
@@ -235,15 +252,7 @@ if __name__ == "__main__":
     legacy = ler_estimativa_legacy()
     legacy.to_csv(SAIDA_LEGACY, index=False, sep=";", decimal=",", float_format="%.2f")
     print(f"Legacy: {len(legacy)} anos ({legacy['ano'].min()}-{legacy['ano'].max()}) em {SAIDA_LEGACY}")
-    arquivo_modelo = BASE / "data_output" / "dividendos_carteira_por_ano.csv"
-    modelo = None
-    if arquivo_modelo.exists():
-        modelo = pd.read_csv(arquivo_modelo, sep=";", decimal=",", index_col=0).loc["TOTAL"]
-    realizado = (resumo_anual.loc["dividendos", ["2025", "2026"]]
-                 + resumo_anual.loc["juros", ["2025", "2026"]])
-    realizado.index = realizado.index.astype(int)
-    plotar_legacy(legacy, modelo, realizado)
-    print(f"Gráfico Legacy salvo em {FIGURA_LEGACY}")
+    gerar_grafico_legacy()
     plotar_pizza_carteira(carteira)
     print(f"Pizza salva em {FIGURA_PIZZA}")
     cotacoes = buscar_cotacoes_yahoo((carteira.loc[carteira["quantidade"] > 0, "ativo"] + ".SA"))
