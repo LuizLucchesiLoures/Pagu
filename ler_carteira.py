@@ -21,6 +21,7 @@ COLUNAS = {
 APELIDOS = {"VALE": "VALE3", "AXIA": "AXIA3", "GRO": "GROP31"}
 # Estimativa de dividendos feita no passado ("Legacy"): W = ano, X = valor
 LEGACY_LINHAS = (4, 42)
+FIGURA_LEGACY = BASE / "fig" / "legacy_dividendos.png"
 SAIDA_LEGACY = BASE / "data_output" / "estimativa_legacy.csv"
 SAIDA = BASE / "data_output" / "carteira_lida.csv"
 FIGURA_PIZZA = BASE / "fig" / "carteira_pizza.png"
@@ -48,6 +49,21 @@ def ler_estimativa_legacy(caminho=ARQUIVO, aba=ABA, linhas=LEGACY_LINHAS):
     df = pd.DataFrame(registros, columns=["ano", "dividendos_legacy"]).dropna()
     df["ano"] = df["ano"].astype(int)
     return df.reset_index(drop=True)
+
+
+def plotar_legacy(legacy, caminho_saida=FIGURA_LEGACY):
+    """Barras: ano (horizontal) × dividendos estimados Legacy (vertical, R$ mil)."""
+    figura, eixo = plt.subplots(figsize=(12, 5.5))
+    eixo.bar(legacy["ano"], legacy["dividendos_legacy"] / 1000, color="#2f5597")
+    eixo.set_xlabel("Ano")
+    eixo.set_ylabel("Dividendos estimados (R$ mil)")
+    eixo.set_title("Estimativa de dividendos Legacy por ano")
+    eixo.set_xticks(legacy["ano"][::2])
+    eixo.tick_params(axis="x", rotation=60)
+    eixo.grid(axis="y", alpha=0.3)
+    caminho_saida.parent.mkdir(exist_ok=True)
+    figura.savefig(caminho_saida, dpi=150, bbox_inches="tight")
+    plt.close(figura)
 
 
 def buscar_cotacoes_yahoo(tickers):
@@ -176,6 +192,8 @@ if __name__ == "__main__":
     legacy = ler_estimativa_legacy()
     legacy.to_csv(SAIDA_LEGACY, index=False, sep=";", decimal=",", float_format="%.2f")
     print(f"Legacy: {len(legacy)} anos ({legacy['ano'].min()}-{legacy['ano'].max()}) em {SAIDA_LEGACY}")
+    plotar_legacy(legacy)
+    print(f"Gráfico Legacy salvo em {FIGURA_LEGACY}")
     plotar_pizza_carteira(carteira)
     print(f"Pizza salva em {FIGURA_PIZZA}")
     cotacoes = buscar_cotacoes_yahoo((carteira.loc[carteira["quantidade"] > 0, "ativo"] + ".SA"))
