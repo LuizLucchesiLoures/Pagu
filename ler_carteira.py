@@ -19,6 +19,9 @@ COLUNAS = {
 }
 # Nomes da planilha que não são o ticker completo
 APELIDOS = {"VALE": "VALE3", "AXIA": "AXIA3", "GRO": "GROP31"}
+# Estimativa de dividendos feita no passado ("Legacy"): W = ano, X = valor
+LEGACY_LINHAS = (4, 42)
+SAIDA_LEGACY = BASE / "data_output" / "estimativa_legacy.csv"
 SAIDA = BASE / "data_output" / "carteira_lida.csv"
 FIGURA_PIZZA = BASE / "fig" / "carteira_pizza.png"
 SAIDA_RESUMO = BASE / "data_output" / "resumo_carteira.csv"
@@ -35,6 +38,15 @@ def ler_carteira_excel(caminho=ARQUIVO, aba=ABA):
     df = pd.DataFrame(dados).dropna(subset=["ativo"])
     df["ativo"] = df["ativo"].astype(str).str.strip().str.upper()
     df["ativo"] = df["ativo"].replace(APELIDOS)
+    return df.reset_index(drop=True)
+
+
+def ler_estimativa_legacy(caminho=ARQUIVO, aba=ABA, linhas=LEGACY_LINHAS):
+    """Lê ano (coluna W) e dividendos estimados (coluna X); descarta linhas vazias."""
+    ws = load_workbook(caminho, data_only=True, read_only=True)[aba]
+    registros = [(ws[f"W{i}"].value, ws[f"X{i}"].value) for i in range(linhas[0], linhas[1] + 1)]
+    df = pd.DataFrame(registros, columns=["ano", "dividendos_legacy"]).dropna()
+    df["ano"] = df["ano"].astype(int)
     return df.reset_index(drop=True)
 
 
@@ -161,6 +173,9 @@ if __name__ == "__main__":
     carteira.to_csv(SAIDA, index=False, decimal=",", sep=";")
     print(carteira.to_string())
     print(f"\nSalvo em {SAIDA}")
+    legacy = ler_estimativa_legacy()
+    legacy.to_csv(SAIDA_LEGACY, index=False, sep=";", decimal=",", float_format="%.2f")
+    print(f"Legacy: {len(legacy)} anos ({legacy['ano'].min()}-{legacy['ano'].max()}) em {SAIDA_LEGACY}")
     plotar_pizza_carteira(carteira)
     print(f"Pizza salva em {FIGURA_PIZZA}")
     cotacoes = buscar_cotacoes_yahoo((carteira.loc[carteira["quantidade"] > 0, "ativo"] + ".SA"))
