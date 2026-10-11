@@ -225,6 +225,9 @@ def montar():
 <h2>Dividendos esperados por ativo e ano (R$ mil)</h2>
 <p>Mediana do dividendo por ação × sua quantidade, a preços de 2025.</p>
 {imagem_png(FIG / 'FCL' / 'dividendos_carteira_grafico.png', 'Dividendos por ano, empilhado')}
+<h3>Legacy × modelo × realizado</h3>
+<p>Legacy é a estimativa antiga da planilha; realizado = dividendos + juros (aba resumo, 2026 parcial).</p>
+{imagem_png(FIG / 'legacy_dividendos.png', 'Dividendos por ano: Legacy, modelo e realizado')}
 <h3>Acumulado até {anos_div.max()}</h3>{grafico_acumulado(dividendos)}
 <h3>Tabela completa</h3><div class='rolar'>{tab_div}</div>"""),
         ("vp", "Valor presente", f"""
