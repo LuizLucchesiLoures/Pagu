@@ -55,24 +55,25 @@ def ler_estimativa_legacy(caminho=ARQUIVO, aba=ABA, linhas=LEGACY_LINHAS):
     return df.reset_index(drop=True)
 
 
-def plotar_legacy(legacy, modelo=None, caminho_saida=FIGURA_LEGACY):
-    """Barras por ano: dividendos Legacy (planilha) e, se houver, os do modelo (R$ mil).
+def plotar_legacy(legacy, modelo=None, realizado=None, caminho_saida=FIGURA_LEGACY):
+    """Barras por ano (R$ mil): Legacy (planilha), modelo e proventos realizados.
 
-    `modelo` é uma Series indexada por ano (total de dividendos da carteira).
+    `modelo` e `realizado` são Series indexadas por ano.
     """
+    series = [("Legacy (planilha)", legacy.set_index("ano")["dividendos_legacy"], "#2f5597")]
+    if modelo is not None:
+        series.append(("Modelo bayesiano (mediana)", modelo.set_axis(modelo.index.astype(int)), "#e67e22"))
+    if realizado is not None:
+        series.append(("Realizado (dividendos + juros)", realizado, "#2e8b57"))
+    largura = 0.8 / len(series)
     figura, eixo = plt.subplots(figsize=(13, 6))
-    if modelo is None:
-        eixo.bar(legacy["ano"], legacy["dividendos_legacy"] / 1000, color="#2f5597", label="Legacy")
-    else:
-        largura = 0.4
-        eixo.bar(legacy["ano"] - largura / 2, legacy["dividendos_legacy"] / 1000,
-                 width=largura, color="#2f5597", label="Legacy (planilha)")
-        eixo.bar(modelo.index.astype(int) + largura / 2, modelo / 1000,
-                 width=largura, color="#e67e22", label="Modelo bayesiano (mediana)")
+    for i, (nome, serie, cor) in enumerate(series):
+        deslocamento = (i - (len(series) - 1) / 2) * largura
+        eixo.bar(serie.index + deslocamento, serie / 1000, width=largura, color=cor, label=nome)
     eixo.set_xlabel("Ano")
-    eixo.set_ylabel("Dividendos estimados (R$ mil)")
-    eixo.set_title("Dividendos estimados por ano: Legacy × modelo")
-    anos = sorted(set(legacy["ano"]) | (set() if modelo is None else set(modelo.index.astype(int))))
+    eixo.set_ylabel("Dividendos / proventos (R$ mil)")
+    eixo.set_title("Dividendos por ano: Legacy × modelo × realizado")
+    anos = sorted(set().union(*(set(serie.index) for _, serie, _ in series)))
     eixo.set_xticks(anos[::2])
     eixo.tick_params(axis="x", rotation=60)
     eixo.grid(axis="y", alpha=0.3)
@@ -238,7 +239,10 @@ if __name__ == "__main__":
     modelo = None
     if arquivo_modelo.exists():
         modelo = pd.read_csv(arquivo_modelo, sep=";", decimal=",", index_col=0).loc["TOTAL"]
-    plotar_legacy(legacy, modelo)
+    realizado = (resumo_anual.loc["dividendos", ["2025", "2026"]]
+                 + resumo_anual.loc["juros", ["2025", "2026"]])
+    realizado.index = realizado.index.astype(int)
+    plotar_legacy(legacy, modelo, realizado)
     print(f"Gráfico Legacy salvo em {FIGURA_LEGACY}")
     plotar_pizza_carteira(carteira)
     print(f"Pizza salva em {FIGURA_PIZZA}")
