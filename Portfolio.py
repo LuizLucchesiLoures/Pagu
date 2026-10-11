@@ -1988,6 +1988,7 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     grafico_div_carteira = FIG_DIR / "dividendos_carteira_grafico.png"
     plotar_dividendos_carteira(dividendos_carteira, grafico_div_carteira)
     print(f"Gráfico dos dividendos da carteira salvo em: {grafico_div_carteira}")
+    gerar_grafico_legacy(ano_final=ano_final_plot)
 
     figura_pizza = FIG_DIR / "carteira_pizza_modelo.png"
     plotar_pizza_carteira(carteira_planilha, figura_pizza, ativos=list(TICKERS_YAHOO_ACOES))
