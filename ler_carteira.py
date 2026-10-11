@@ -20,7 +20,7 @@ COLUNAS = {
 # Nomes da planilha que não são o ticker completo
 APELIDOS = {"VALE": "VALE3", "AXIA": "AXIA3", "GRO": "GROP31"}
 # Estimativa de dividendos feita no passado ("Legacy"): W = ano, X = valor
-LEGACY_LINHAS = (4, 42)
+LEGACY_LINHAS = (3, 42)
 FIGURA_LEGACY = BASE / "fig" / "legacy_dividendos.png"
 SAIDA_LEGACY = BASE / "data_output" / "estimativa_legacy.csv"
 SAIDA = BASE / "data_output" / "carteira_lida.csv"
