@@ -43,6 +43,9 @@ FRACAO_COTACAO = 0.7 #limiar do VP: fração da cotação atual (1.0 = a própri
 anos_projecao = criar_anos_projecao(ano_inicial, ano_final)
 USAR_FCL_CORRIGIDO_capex_expandido = True
 USAR_FCL_FUTURO_PROJETADO = True
+# True: as projeções do arquivo estão em valores nominais; são deflacionadas
+# pela INFLACAO até os preços do ano-base do FCL (False: já estão em reais de hoje)
+DEFLACIONAR_FCL_FUTURO_PROJETADO = True
 USAR_FCL_CORRIGIDO_INPC = True
 USAR_EMPRESAS_MUTLIVARIADAS = True
 USAR_PAYOUT_BAYESIANO = True
@@ -1025,6 +1028,10 @@ fcl, capex_expansao, fcl_futuro_projetado, proventos_anuais = ler_dados_entrada(
     usar_capex=USAR_FCL_CORRIGIDO_capex_expandido,
     diretorio_saida=OUTPUT_DIR,
 )
+if DEFLACIONAR_FCL_FUTURO_PROJETADO:
+    fatores_deflacao = (1 + INFLACAO) ** (fcl_futuro_projetado.columns - ano_base_fcl)
+    fcl_futuro_projetado = fcl_futuro_projetado.div(fatores_deflacao, axis="columns")
+    print(f"FCL futuro projetado deflacionado a {INFLACAO:.0%} a.a. para preços de {ano_base_fcl}.")
 print(f"FCL corrigido para preços de {ano_base_fcl}:")
 print(fcl_corrigido)
 
