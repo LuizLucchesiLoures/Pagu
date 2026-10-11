@@ -23,6 +23,10 @@ APELIDOS = {"VALE": "VALE3", "AXIA": "AXIA3", "GRO": "GROP31"}
 LEGACY_LINHAS = (3, 42)
 FIGURA_LEGACY = BASE / "fig" / "legacy_dividendos.png"
 SAIDA_LEGACY = BASE / "data_output" / "estimativa_legacy.csv"
+# Aba "resumo": proventos por tipo e aportes/retiradas por ano
+ABA_RESUMO = "resumo"
+INTERVALO_RESUMO = "A1:R11"
+SAIDA_RESUMO_ANUAL = BASE / "data_output" / "resumo_anual.csv"
 SAIDA = BASE / "data_output" / "carteira_lida.csv"
 FIGURA_PIZZA = BASE / "fig" / "carteira_pizza.png"
 SAIDA_RESUMO = BASE / "data_output" / "resumo_carteira.csv"
@@ -76,6 +80,29 @@ def plotar_legacy(legacy, modelo=None, caminho_saida=FIGURA_LEGACY):
     caminho_saida.parent.mkdir(exist_ok=True)
     figura.savefig(caminho_saida, dpi=150, bbox_inches="tight")
     plt.close(figura)
+
+
+def ler_resumo_anual(caminho=ARQUIVO, aba=ABA_RESUMO, intervalo=INTERVALO_RESUMO):
+    """Lê a tabela da aba resumo (itens nas linhas, anos nas colunas).
+
+    A coluna TOTAL vem da planilha. O rótulo "total" aparece duas vezes na
+    planilha; aqui ficam "total proventos" (linha 6) e "saldo aportes" (linha 11).
+    Células vazias ou só com espaço viram NaN.
+    """
+    ws = load_workbook(caminho, data_only=True)[aba]
+    linhas = [[c.value for c in linha] for linha in ws[intervalo]]
+    cabecalho = ["item"] + [str(c).strip() for c in linhas[0][1:]]
+    itens = []
+    for i, linha in enumerate(linhas[1:], start=2):
+        if linha[0] is None:
+            continue
+        nome = str(linha[0]).strip()
+        if nome == "total":
+            nome = "total proventos" if i < 8 else "saldo aportes"
+        itens.append([nome] + linha[1:])
+    df = pd.DataFrame(itens, columns=cabecalho).set_index("item")
+    df = df.apply(lambda col: pd.to_numeric(col.map(lambda v: np.nan if isinstance(v, str) else v)))
+    return df
 
 
 def buscar_cotacoes_yahoo(tickers):
@@ -201,6 +228,9 @@ if __name__ == "__main__":
     carteira.to_csv(SAIDA, index=False, decimal=",", sep=";")
     print(carteira.to_string())
     print(f"\nSalvo em {SAIDA}")
+    resumo_anual = ler_resumo_anual()
+    resumo_anual.to_csv(SAIDA_RESUMO_ANUAL, sep=";", decimal=",", float_format="%.2f")
+    print(f"Resumo anual (aba resumo) salvo em {SAIDA_RESUMO_ANUAL}")
     legacy = ler_estimativa_legacy()
     legacy.to_csv(SAIDA_LEGACY, index=False, sep=";", decimal=",", float_format="%.2f")
     print(f"Legacy: {len(legacy)} anos ({legacy['ano'].min()}-{legacy['ano'].max()}) em {SAIDA_LEGACY}")
