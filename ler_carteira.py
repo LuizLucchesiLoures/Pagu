@@ -51,16 +51,28 @@ def ler_estimativa_legacy(caminho=ARQUIVO, aba=ABA, linhas=LEGACY_LINHAS):
     return df.reset_index(drop=True)
 
 
-def plotar_legacy(legacy, caminho_saida=FIGURA_LEGACY):
-    """Barras: ano (horizontal) × dividendos estimados Legacy (vertical, R$ mil)."""
-    figura, eixo = plt.subplots(figsize=(12, 5.5))
-    eixo.bar(legacy["ano"], legacy["dividendos_legacy"] / 1000, color="#2f5597")
+def plotar_legacy(legacy, modelo=None, caminho_saida=FIGURA_LEGACY):
+    """Barras por ano: dividendos Legacy (planilha) e, se houver, os do modelo (R$ mil).
+
+    `modelo` é uma Series indexada por ano (total de dividendos da carteira).
+    """
+    figura, eixo = plt.subplots(figsize=(13, 6))
+    if modelo is None:
+        eixo.bar(legacy["ano"], legacy["dividendos_legacy"] / 1000, color="#2f5597", label="Legacy")
+    else:
+        largura = 0.4
+        eixo.bar(legacy["ano"] - largura / 2, legacy["dividendos_legacy"] / 1000,
+                 width=largura, color="#2f5597", label="Legacy (planilha)")
+        eixo.bar(modelo.index.astype(int) + largura / 2, modelo / 1000,
+                 width=largura, color="#e67e22", label="Modelo bayesiano (mediana)")
     eixo.set_xlabel("Ano")
     eixo.set_ylabel("Dividendos estimados (R$ mil)")
-    eixo.set_title("Estimativa de dividendos Legacy por ano")
-    eixo.set_xticks(legacy["ano"][::2])
+    eixo.set_title("Dividendos estimados por ano: Legacy × modelo")
+    anos = sorted(set(legacy["ano"]) | (set() if modelo is None else set(modelo.index.astype(int))))
+    eixo.set_xticks(anos[::2])
     eixo.tick_params(axis="x", rotation=60)
     eixo.grid(axis="y", alpha=0.3)
+    eixo.legend()
     caminho_saida.parent.mkdir(exist_ok=True)
     figura.savefig(caminho_saida, dpi=150, bbox_inches="tight")
     plt.close(figura)
@@ -192,7 +204,11 @@ if __name__ == "__main__":
     legacy = ler_estimativa_legacy()
     legacy.to_csv(SAIDA_LEGACY, index=False, sep=";", decimal=",", float_format="%.2f")
     print(f"Legacy: {len(legacy)} anos ({legacy['ano'].min()}-{legacy['ano'].max()}) em {SAIDA_LEGACY}")
-    plotar_legacy(legacy)
+    arquivo_modelo = BASE / "data_output" / "dividendos_carteira_por_ano.csv"
+    modelo = None
+    if arquivo_modelo.exists():
+        modelo = pd.read_csv(arquivo_modelo, sep=";", decimal=",", index_col=0).loc["TOTAL"]
+    plotar_legacy(legacy, modelo)
     print(f"Gráfico Legacy salvo em {FIGURA_LEGACY}")
     plotar_pizza_carteira(carteira)
     print(f"Pizza salva em {FIGURA_PIZZA}")
