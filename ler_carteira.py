@@ -19,6 +19,14 @@ COLUNAS = {
 }
 # Nomes da planilha que não são o ticker completo
 APELIDOS = {"VALE": "VALE3", "AXIA": "AXIA3", "GRO": "GROP31"}
+# Estimativa de dividendos feita no passado ("Legacy"): W = ano, X = valor
+LEGACY_LINHAS = (3, 42)
+FIGURA_LEGACY = BASE / "fig" / "legacy_dividendos.png"
+SAIDA_LEGACY = BASE / "data_output" / "estimativa_legacy.csv"
+# Aba "resumo": proventos por tipo e aportes/retiradas por ano
+ABA_RESUMO = "resumo"
+INTERVALO_RESUMO = "A1:R11"
+SAIDA_RESUMO_ANUAL = BASE / "data_output" / "resumo_anual.csv"
 SAIDA = BASE / "data_output" / "carteira_lida.csv"
 FIGURA_PIZZA = BASE / "fig" / "carteira_pizza.png"
 SAIDA_RESUMO = BASE / "data_output" / "resumo_carteira.csv"
@@ -36,6 +44,83 @@ def ler_carteira_excel(caminho=ARQUIVO, aba=ABA):
     df["ativo"] = df["ativo"].astype(str).str.strip().str.upper()
     df["ativo"] = df["ativo"].replace(APELIDOS)
     return df.reset_index(drop=True)
+
+
+def ler_estimativa_legacy(caminho=ARQUIVO, aba=ABA, linhas=LEGACY_LINHAS):
+    """Lê ano (coluna W) e dividendos estimados (coluna X); descarta linhas vazias."""
+    ws = load_workbook(caminho, data_only=True, read_only=True)[aba]
+    registros = [(ws[f"W{i}"].value, ws[f"X{i}"].value) for i in range(linhas[0], linhas[1] + 1)]
+    df = pd.DataFrame(registros, columns=["ano", "dividendos_legacy"]).dropna()
+    df["ano"] = df["ano"].astype(int)
+    return df.reset_index(drop=True)
+
+
+def plotar_legacy(legacy, modelo=None, realizado=None, caminho_saida=FIGURA_LEGACY, ano_final=None):
+    """Barras por ano (R$ mil): Legacy (planilha), modelo e proventos realizados.
+
+    `modelo` e `realizado` são Series indexadas por ano. Se `ano_final` for
+    informado, os anos posteriores não aparecem.
+    """
+    series = [("Legacy (planilha)", legacy.set_index("ano")["dividendos_legacy"], "#2f5597")]
+    if modelo is not None:
+        series.append(("Modelo bayesiano (mediana)", modelo.set_axis(modelo.index.astype(int)), "#e67e22"))
+    if realizado is not None:
+        series.append(("Realizado (dividendos + juros)", realizado, "#2e8b57"))
+    if ano_final is not None:
+        series = [(n, sr[sr.index <= ano_final], c) for n, sr, c in series]
+    largura = 0.8 / len(series)
+    figura, eixo = plt.subplots(figsize=(13, 6))
+    for i, (nome, serie, cor) in enumerate(series):
+        deslocamento = (i - (len(series) - 1) / 2) * largura
+        eixo.bar(serie.index + deslocamento, serie / 1000, width=largura, color=cor, label=nome)
+    eixo.set_xlabel("Ano")
+    eixo.set_ylabel("Dividendos / proventos (R$ mil)")
+    eixo.set_title("Dividendos por ano: Legacy × modelo × realizado")
+    anos = sorted(set().union(*(set(serie.index) for _, serie, _ in series)))
+    eixo.set_xticks(anos[::2])
+    eixo.tick_params(axis="x", rotation=60)
+    eixo.grid(axis="y", alpha=0.3)
+    eixo.legend()
+    caminho_saida.parent.mkdir(exist_ok=True)
+    figura.savefig(caminho_saida, dpi=150, bbox_inches="tight")
+    plt.close(figura)
+
+
+def ler_resumo_anual(caminho=ARQUIVO, aba=ABA_RESUMO, intervalo=INTERVALO_RESUMO):
+    """Lê a tabela da aba resumo (itens nas linhas, anos nas colunas).
+
+    A coluna TOTAL vem da planilha. O rótulo "total" aparece duas vezes na
+    planilha; aqui ficam "total proventos" (linha 6) e "saldo aportes" (linha 11).
+    Células vazias ou só com espaço viram NaN.
+    """
+    ws = load_workbook(caminho, data_only=True)[aba]
+    linhas = [[c.value for c in linha] for linha in ws[intervalo]]
+    cabecalho = ["item"] + [str(c).strip() for c in linhas[0][1:]]
+    itens = []
+    for i, linha in enumerate(linhas[1:], start=2):
+        if linha[0] is None:
+            continue
+        nome = str(linha[0]).strip()
+        if nome == "total":
+            nome = "total proventos" if i < 8 else "saldo aportes"
+        itens.append([nome] + linha[1:])
+    df = pd.DataFrame(itens, columns=cabecalho).set_index("item")
+    df = df.apply(lambda col: pd.to_numeric(col.map(lambda v: np.nan if isinstance(v, str) else v)))
+    return df
+
+
+def gerar_grafico_legacy(ano_final=None):
+    """Lê os CSVs já gerados (Legacy, modelo e realizado) e salva o gráfico de barras."""
+    legacy = pd.read_csv(SAIDA_LEGACY, sep=";", decimal=",")
+    arquivo_modelo = BASE / "data_output" / "dividendos_carteira_por_ano.csv"
+    modelo = None
+    if arquivo_modelo.exists():
+        modelo = pd.read_csv(arquivo_modelo, sep=";", decimal=",", index_col=0).loc["TOTAL"]
+    anual = pd.read_csv(SAIDA_RESUMO_ANUAL, sep=";", decimal=",", index_col=0)
+    realizado = anual.loc["dividendos", ["2025", "2026"]] + anual.loc["juros", ["2025", "2026"]]
+    realizado.index = realizado.index.astype(int)
+    plotar_legacy(legacy, modelo, realizado, ano_final=ano_final)
+    print(f"Gráfico Legacy salvo em {FIGURA_LEGACY}")
 
 
 def buscar_cotacoes_yahoo(tickers):
@@ -161,6 +246,13 @@ if __name__ == "__main__":
     carteira.to_csv(SAIDA, index=False, decimal=",", sep=";")
     print(carteira.to_string())
     print(f"\nSalvo em {SAIDA}")
+    resumo_anual = ler_resumo_anual()
+    resumo_anual.to_csv(SAIDA_RESUMO_ANUAL, sep=";", decimal=",", float_format="%.2f")
+    print(f"Resumo anual (aba resumo) salvo em {SAIDA_RESUMO_ANUAL}")
+    legacy = ler_estimativa_legacy()
+    legacy.to_csv(SAIDA_LEGACY, index=False, sep=";", decimal=",", float_format="%.2f")
+    print(f"Legacy: {len(legacy)} anos ({legacy['ano'].min()}-{legacy['ano'].max()}) em {SAIDA_LEGACY}")
+    gerar_grafico_legacy()
     plotar_pizza_carteira(carteira)
     print(f"Pizza salva em {FIGURA_PIZZA}")
     cotacoes = buscar_cotacoes_yahoo((carteira.loc[carteira["quantidade"] > 0, "ativo"] + ".SA"))

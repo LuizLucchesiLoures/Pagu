@@ -12,7 +12,12 @@ from datetime import date
 from urllib.parse import urlencode
 from urllib.request import urlopen
 import json
-from ler_carteira import buscar_cotacoes_yahoo, ler_carteira_excel, plotar_pizza_carteira
+from ler_carteira import (
+    buscar_cotacoes_yahoo,
+    gerar_grafico_legacy,
+    ler_carteira_excel,
+    plotar_pizza_carteira,
+)
 
 matplotlib.use("Agg")
 
@@ -38,6 +43,9 @@ FRACAO_COTACAO = 0.7 #limiar do VP: fração da cotação atual (1.0 = a própri
 anos_projecao = criar_anos_projecao(ano_inicial, ano_final)
 USAR_FCL_CORRIGIDO_capex_expandido = True
 USAR_FCL_FUTURO_PROJETADO = True
+# True: as projeções do arquivo estão em valores nominais; são deflacionadas
+# pela INFLACAO até os preços do ano-base do FCL (False: já estão em reais de hoje)
+DEFLACIONAR_FCL_FUTURO_PROJETADO = True
 USAR_FCL_CORRIGIDO_INPC = True
 USAR_EMPRESAS_MUTLIVARIADAS = True
 USAR_PAYOUT_BAYESIANO = True
@@ -664,12 +672,12 @@ def dividendos_anuais_carteira(
     """Tabela de dividendos esperados por ativo (linhas) e ano (colunas), em R$.
 
     Valor = mediana do dividendo por ação × quantidade de ações da sua carteira.
-    Só entram anos depois de `ano_base` e ativos que estão no modelo. A última
+    Entram o `ano_base` (último ano observado) e os seguintes, e só ativos que estão no modelo. A última
     linha, TOTAL, soma os ativos.
     """
     posicao = carteira.set_index("ativo")["quantidade"]
     anos = np.asarray(anos_dividendos)
-    indices_anos = np.where(anos > ano_base)[0]
+    indices_anos = np.where(anos >= ano_base)[0]
     linhas = {}
     for i, empresa in enumerate(empresas):
         ativo = empresa.replace(".SA", "")
@@ -1020,6 +1028,10 @@ fcl, capex_expansao, fcl_futuro_projetado, proventos_anuais = ler_dados_entrada(
     usar_capex=USAR_FCL_CORRIGIDO_capex_expandido,
     diretorio_saida=OUTPUT_DIR,
 )
+if DEFLACIONAR_FCL_FUTURO_PROJETADO:
+    fatores_deflacao = (1 + INFLACAO) ** (fcl_futuro_projetado.columns - ano_base_fcl)
+    fcl_futuro_projetado = fcl_futuro_projetado.div(fatores_deflacao, axis="columns")
+    print(f"FCL futuro projetado deflacionado a {INFLACAO:.0%} a.a. para preços de {ano_base_fcl}.")
 print(f"FCL corrigido para preços de {ano_base_fcl}:")
 print(fcl_corrigido)
 
@@ -1983,6 +1995,7 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     grafico_div_carteira = FIG_DIR / "dividendos_carteira_grafico.png"
     plotar_dividendos_carteira(dividendos_carteira, grafico_div_carteira)
     print(f"Gráfico dos dividendos da carteira salvo em: {grafico_div_carteira}")
+    gerar_grafico_legacy(ano_final=ano_final_plot)
 
     figura_pizza = FIG_DIR / "carteira_pizza_modelo.png"
     plotar_pizza_carteira(carteira_planilha, figura_pizza, ativos=list(TICKERS_YAHOO_ACOES))

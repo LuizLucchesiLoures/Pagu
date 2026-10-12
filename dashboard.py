@@ -61,6 +61,16 @@ def grafico_lucro(resumo):
     return figura_svg(figura)
 
 
+def grafico_pizza_valor_atual(resumo):
+    atual = resumo.drop(index="TOTAL")["valor_atual"].sort_values(ascending=False)
+    figura, eixo = plt.subplots(figsize=(7, 7))
+    eixo.pie(atual, labels=atual.index, autopct="%1.1f%%", startangle=90, counterclock=False,
+             colors=plt.cm.tab20.colors[: len(atual)], pctdistance=0.8,
+             wedgeprops={"edgecolor": "white"})
+    eixo.set_title(f"Valor atual: {reais(atual.sum())}")
+    return figura_svg(figura)
+
+
 def grafico_acumulado(dividendos):
     por_ativo = dividendos.drop(index="TOTAL") / 1000
     acumulado = por_ativo.cumsum(axis=1)
@@ -210,11 +220,14 @@ def montar():
 <h2>Resumo da carteira</h2><div class='rolar'>{tab_resumo}</div>
 <div class='grade' style='margin-top:20px'>
 <div><h3>Lucro por ativo</h3>{grafico_lucro(resumo)}</div>
-<div><h3>Composição (valor investido)</h3>{imagem_png(FIG / 'carteira_pizza.png', 'Pizza da carteira')}</div></div>"""),
+<div><h3>Composição (valor atual)</h3>{grafico_pizza_valor_atual(resumo)}</div></div>"""),
         ("dividendos", "Dividendos esperados", f"""
 <h2>Dividendos esperados por ativo e ano (R$ mil)</h2>
 <p>Mediana do dividendo por ação × sua quantidade, a preços de 2025.</p>
 {imagem_png(FIG / 'FCL' / 'dividendos_carteira_grafico.png', 'Dividendos por ano, empilhado')}
+<h3>Legacy × modelo × realizado</h3>
+<p>Legacy é a estimativa antiga da planilha; realizado = dividendos + juros (aba resumo, 2026 parcial).</p>
+{imagem_png(FIG / 'legacy_dividendos.png', 'Dividendos por ano: Legacy, modelo e realizado')}
 <h3>Acumulado até {anos_div.max()}</h3>{grafico_acumulado(dividendos)}
 <h3>Tabela completa</h3><div class='rolar'>{tab_div}</div>"""),
         ("vp", "Valor presente", f"""
