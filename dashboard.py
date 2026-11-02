@@ -35,9 +35,12 @@ def pct(x):
     return f"{x:+.1%}".replace(".", ",")
 
 
-def imagem_png(caminho, legenda):
+def imagem_png(caminho, legenda, classe_imagem=None):
     dados = base64.b64encode(Path(caminho).read_bytes()).decode()
-    return (f'<figure><img src="data:image/png;base64,{dados}" alt="{escape(legenda)}">'
+    imagem = f'<img src="data:image/png;base64,{dados}" alt="{escape(legenda)}">'
+    if classe_imagem:
+        imagem = f'<div class="{classe_imagem}">{imagem}</div>'
+    return (f"<figure>{imagem}"
             f"<figcaption>{escape(legenda)}</figcaption></figure>")
 
 
@@ -127,7 +130,12 @@ nav button.ativo{background:#2f5597;color:#fff}
 section{display:none;background:#fff;border-radius:10px;padding:20px;box-shadow:0 1px 4px #0001}
 section.ativo{display:block}
 h2{margin-top:0}.grade{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:20px}
+.grade-modelo{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
 figure{margin:0}img,svg{max-width:100%;height:auto}figcaption{font-size:13px;color:#6b7280}
+.grade-modelo figure{display:flex;flex-direction:column;min-width:0}
+.grade-modelo .imagem-modelo{aspect-ratio:1728 / 4714;display:flex;justify-content:center;overflow:hidden}
+.grade-modelo .imagem-modelo img{width:auto;height:100%;max-width:none;flex:none}
+.grade-modelo figcaption{font-size:13px;line-height:1.3;min-height:2.6em;padding-top:4px}
 .rolar{overflow-x:auto}
 table{border-collapse:collapse;width:100%;font-size:14px}
 th{background:#d9e2f3;cursor:pointer;padding:8px;white-space:nowrap}
@@ -136,6 +144,7 @@ td:first-child,th:first-child{text-align:left;position:sticky;left:0;background:
 tbody td:first-child{background:#fff}
 .pos{color:#1a7f37}.neg{color:#c0392b}tr.total td{font-weight:bold;background:#f2f2f2}
 .aviso{font-size:13px;color:#6b7280;margin-top:16px}
+@media(max-width:800px){.grade-modelo{grid-template-columns:1fr}}
 """
 
 JS = """
@@ -207,12 +216,13 @@ def montar():
         | {"Prob. VP > preço médio": "{:.0%}".format})
 
     figuras_modelo = "".join(
-        imagem_png(FIG / "FCL" / arquivo, legenda)
-        for arquivo, legenda in [
-            ("FCL_graficos_multivariado.png", "FCL: histórico e previsão"),
-            ("matriz_correlacao_posterior.png", "Correlação entre empresas"),
-            ("payout_densidade_posterior.png", "Payout: densidade posterior"),
-            ("dividendos_todas_dependente.png", "Dividendos totais por empresa (P10/P50/P90)"),
+        imagem_png(FIG / "FCL" / arquivo, legenda, classe_imagem)
+        for arquivo, legenda, classe_imagem in [
+            ("FCL_graficos_multivariado.png", "FCL: histórico e previsão", "imagem-modelo"),
+            ("dividendos_todas_dependente.png", "Dividendos totais por empresa (P10/P50/P90)", "imagem-modelo"),
+            ("matriz_correlacao_posterior.png", "Correlação entre empresas", None),
+            ("payout_densidade_posterior.png", "Payout: densidade posterior", None),
+            #("dividendos_todas_dependente.png", "Dividendos totais por empresa (P10/P50/P90)"),
         ] if (FIG / "FCL" / arquivo).exists())
 
     abas = [
@@ -237,7 +247,7 @@ def montar():
 <div class='grade' style='margin-top:20px'>
 {imagem_png(FIG / 'FCL' / 'valor_presente_dividendos_dependente.png', 'Tabela de valor presente')}
 {imagem_png(FIG / 'FCL' / 'valor_presente_distribuicao_dependente.png', 'Distribuição do valor presente')}</div>"""),
-        ("modelo", "Modelo", f"<h2>Por dentro do modelo bayesiano</h2><div class='grade'>{figuras_modelo}</div>"),
+        ("modelo", "Modelo", f"<h2>Por dentro do modelo bayesiano</h2><div class='grade grade-modelo'>{figuras_modelo}</div>"),
     ]
     botoes = "".join(
         f"<button class='{'ativo' if i == 0 else ''}' onclick=\"aba('{id}',this)\">{nome}</button>"
