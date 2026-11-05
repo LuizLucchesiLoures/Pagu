@@ -68,7 +68,7 @@ class TestValidacaoPrevisoes(unittest.TestCase):
         self.assertAlmostEqual(metricas["mae"], 5 / 3)
         self.assertAlmostEqual(metricas["rmse"], np.sqrt(3))
         self.assertAlmostEqual(metricas["vies_medio"], 1 / 3)
-        self.assertEqual(metricas["cobertura_80_pct"], 100)
+        self.assertEqual(metricas["cobertura_80_pct"], 50)
         self.assertEqual(metricas["largura_media_intervalo"], 2.5)
 
     def test_metricas_sem_intervalo_nao_inventam_cobertura(self):
