@@ -202,6 +202,42 @@ No início de `Portfolio.py` existem opções que controlam a análise:
 
 Os resultados são estimativas de um modelo, não recomendação de investimento.
 
+## Avaliação retrospectiva das previsões
+
+O script `validar_previsoes.py` compara previsões de FCL para o ano seguinte
+com resultados históricos que não participaram do ajuste. Ele usa origem móvel
+e janela expansiva: com os dados atuais, treina de 2016 a 2020 para prever 2021,
+depois de 2016 a 2021 para prever 2022, e continua até prever 2025.
+
+Execute no ambiente virtual do projeto:
+
+```bash
+python validar_previsoes.py
+```
+
+O padrão compara o modelo bayesiano multivariado às referências de último valor,
+média histórica e tendência linear. O modelo usa o FCL nominal sem somar o
+Capex realizado no ano previsto, para não usar uma informação que não estaria
+disponível no momento da previsão. Em cada rodada, os dados de treino e o valor
+observado são expressos em preços do ano de origem, usando o INPC. A inflação
+do ano previsto é usada somente para converter o valor observado na avaliação,
+nunca para ajustar a previsão.
+
+O relatório detalhado é salvo em
+`data_output/validacao_previsoes_detalhada.csv`; as métricas por empresa e
+método ficam em `data_output/validacao_previsoes_resumo.csv`; e os gráficos,
+em `fig/FCL/validacao_previsoes.png`. MAE, RMSE e viés são calculados por
+empresa. Cobertura e largura média são reportadas somente para os intervalos
+bayesianos P10–P90; os métodos de referência não recebem intervalos artificiais.
+Há apenas cinco anos de teste por empresa, então os resultados são exploratórios
+e não bastam, isoladamente, para afirmar que um método é superior.
+
+Para ajustar a precisão e a duração da amostragem, use `--draws` e `--tune`.
+`--tickers` permite selecionar empresas; `--somente-referencias` executa os
+métodos não bayesianos sem ajustar o modelo. Essa última opção é útil para
+conferir os arquivos e a avaliação temporal, mas não substitui a comparação
+completa que inclui o modelo bayesiano.
+
 ## Git e repositório remoto
 
 Esta pasta já possui um repositório Git local. Para conferir o que será
