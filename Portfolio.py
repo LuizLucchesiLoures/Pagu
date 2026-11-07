@@ -7,11 +7,14 @@ import pandas as pd
 import pymc as pm
 import yfinance as yf
 from pathlib import Path
+from scipy.optimize import minimize
+from scipy.spatial import ConvexHull
 from scipy.stats import gaussian_kde, halfnorm, norm
 from datetime import date
 from urllib.parse import urlencode
 from urllib.request import urlopen
 import json
+import time
 from ler_carteira import (
     buscar_cotacoes_yahoo,
     gerar_grafico_legacy,
@@ -34,13 +37,21 @@ def criar_anos_projecao(ano_inicial, ano_final):
 
 
 ano_inicial = 2016
-ano_final = 2064
-ano_final_plot = 2064
+ano_final = 2030
+ano_final_plot = 2030
 TAXA = 0.06 #taxa de juros livre de riscos (real, acima da inflação)
 INFLACAO = 0.04 #inflação anual esperada de longo prazo
 PROB_ALVO = 0.8 #probabilidade desejada de o VP superar o limiar (define a cotação máxima)
 FRACAO_COTACAO = 0.7 #limiar do VP: fração da cotação atual (1.0 = a própria cotação)
 anos_projecao = criar_anos_projecao(ano_inicial, ano_final)
+# Janela do gráfico volatilidade x lucro: [VarMin, VarMax, LucroMin, LucroMax].
+# Eixo x = desvio padrão do VP (R$ mil); eixo y = lucro esperado, mediana do VP (R$).
+varianciaXlucro = [300, 5000, 0, 1200000]
+# Número de carteiras aleatórias sorteadas nos gráficos volatilidade/variância x lucro.
+NUMERO_CARTEIRAS_ALEATORIAS = 50000
+# Volatilidade (desvio padrão do VP, mesma unidade do eixo x de varianciaXlucro, R$ mil) em que se
+# seleciona, sobre o envelope das carteiras, a carteira de maior lucro esperado.
+VARIANCIA_ALVO_ENVELOPE = 1500
 USAR_FCL_CORRIGIDO_capex_expandido = True
 USAR_FCL_FUTURO_PROJETADO = True
 # True: as projeções do arquivo estão em valores nominais; são deflacionadas
@@ -51,11 +62,25 @@ USAR_EMPRESAS_MUTLIVARIADAS = True
 USAR_PAYOUT_BAYESIANO = True
 # True: payout independente do FCL; False: log(payout) depende do log(FCL).
 USAR_PAYOUT_INDEPENDENTE_FCL = False
+# Covariância usada no risco do portfólio:
+# "FCL": covariância residual do FCL (covariancia_media), convertida para dividendos;
+# "DIVIDENDOS": covariância dos dividendos simulados, ano a ano.
+COR_FCL_ou_DIVIDENDOS = "DIVIDENDOS"
 TICKERS_YAHOO_ACOES = {
     "ITUB3.SA": ("ITUB3.SA", "ITUB4.SA"),
     "FESA4.SA": ("FESA3.SA", "FESA4.SA"),
     "EGIE3.SA": ("EGIE3.SA",),
     "VALE3.SA": ("VALE3.SA",),
+    "BPAC11.SA": ("BPAC11.SA",),
+    "AXIA3.SA": ("AXIA3.SA",),
+    "BRBI11.SA": ("BRBI11.SA",),
+    "AURA33.SA": ("AURA33.SA",),
+    "RANI3.SA": ("RANI3.SA",),
+    "LEVE3.SA": ("LEVE3.SA",),
+}
+# Quantidades usadas quando o Yahoo Finance não informa sharesOutstanding.
+QUANTIDADE_ACOES_MANUAL = {
+    "BRBI11.SA": 314_987_000,
 }
 # Lista única de ativos: define as empresas de toda a análise.
 empresas = list(TICKERS_YAHOO_ACOES)
@@ -65,14 +90,28 @@ def buscar_quantidade_acoes_yahoo(tickers):
     quantidades = {}
     registros = []
 
+    # Última consulta bem-sucedida, usada se o Yahoo falhar (instabilidade/limite de requisições).
+    arquivo_cache = OUTPUT_DIR / "quantidade_acoes_yahoo.csv"
+    cache = {}
+    if arquivo_cache.exists():
+        anterior = pd.read_csv(arquivo_cache).dropna(subset=["quantidade_acoes"])
+        cache = dict(zip(anterior["ticker"], anterior["quantidade_acoes"].astype(int)))
+
     for ticker in tickers:
         tickers_yahoo = TICKERS_YAHOO_ACOES.get(ticker, (ticker,))
 
         try:
             quantidades_por_classe = []
             for ticker_yahoo in tickers_yahoo:
-                informacoes = yf.Ticker(ticker_yahoo).get_info()
-                quantidade = informacoes.get("sharesOutstanding")
+                quantidade = None
+                for tentativa in range(3):
+                    try:
+                        quantidade = yf.Ticker(ticker_yahoo).get_info().get("sharesOutstanding")
+                    except Exception:
+                        quantidade = None
+                    if quantidade is not None:
+                        break
+                    time.sleep(2 * (tentativa + 1))
                 if quantidade is None:
                     raise ValueError(
                         f"Yahoo Finance não retornou sharesOutstanding para {ticker_yahoo}"
@@ -80,10 +119,15 @@ def buscar_quantidade_acoes_yahoo(tickers):
                 quantidades_por_classe.append(int(quantidade))
             quantidades[ticker] = sum(quantidades_por_classe)
         except Exception as erro:
-            quantidades[ticker] = None
+            quantidades[ticker] = QUANTIDADE_ACOES_MANUAL.get(ticker, cache.get(ticker))
+            origem = (
+                "usando a quantidade manual/da última consulta"
+                if quantidades[ticker] is not None
+                else "sem quantidade manual cadastrada"
+            )
             print(
                 f"Não foi possível obter a quantidade de ações de {ticker} "
-                f"usando {', '.join(tickers_yahoo)}: {erro}"
+                f"usando {', '.join(tickers_yahoo)}: {erro}; {origem}."
             )
 
         registros.append(
@@ -99,10 +143,22 @@ def buscar_quantidade_acoes_yahoo(tickers):
 
 
 quantidades_acoes, tabela_quantidade_acoes = buscar_quantidade_acoes_yahoo(empresas)
+sem_quantidade = [t for t, q in quantidades_acoes.items() if q is None]
+if sem_quantidade:
+    raise RuntimeError(
+        f"Sem quantidade de ações para {sem_quantidade}: o Yahoo falhou. Rode de novo "
+        "ou cadastre em QUANTIDADE_ACOES_MANUAL."
+    )
 quantidade_acoes_itub3 = quantidades_acoes["ITUB3.SA"]
 quantidade_acoes_fesa4 = quantidades_acoes["FESA4.SA"]
 quantidade_acoes_egie3 = quantidades_acoes["EGIE3.SA"]
 quantidade_acoes_vale3 = quantidades_acoes["VALE3.SA"]
+quantidade_acoes_bpac11 = quantidades_acoes["BPAC11.SA"]
+quantidade_acoes_axia3 = quantidades_acoes["AXIA3.SA"]
+quantidade_acoes_brbi11 = quantidades_acoes["BRBI11.SA"]
+quantidade_acoes_aura33 = quantidades_acoes["AURA33.SA"]
+quantidade_acoes_rani3 = quantidades_acoes["RANI3.SA"]
+quantidade_acoes_leve3 = quantidades_acoes["LEVE3.SA"]
 
 arquivo_quantidade_acoes = OUTPUT_DIR / "quantidade_acoes_yahoo.csv"
 tabela_quantidade_acoes.to_csv(arquivo_quantidade_acoes, index=False)
@@ -176,22 +232,23 @@ def ler_dados_entrada(diretorio_dados):
         "sep": "\t",
         "index_col": 0,
     }
-    fcl = pd.read_csv(diretorio_dados / "FCL.csv", decimal=",", **opcoes_csv)
-    capex_expansao = pd.read_csv(
-        diretorio_dados / "Capex_Expancao.csv",
-        decimal=",",
-        **opcoes_csv,
-    )
-    fcl_futuro_projetado = pd.read_csv(
-        diretorio_dados / "FCL_futuro_projetado.csv",
-        decimal=",",
-        **opcoes_csv,
-    )
-    proventos_anuais = pd.read_csv(
-        diretorio_dados / "proventos.csv",
-        decimal=",",
-        **opcoes_csv,
-    )
+    def ler_tabela_numerica(nome_arquivo):
+        # Aceita vírgula ou ponto como separador decimal, mesmo misturados.
+        tabela = pd.read_csv(diretorio_dados / nome_arquivo, dtype=str, **opcoes_csv)
+        return tabela.apply(
+            lambda coluna: pd.to_numeric(
+                coluna.str.strip().str.replace(",", ".", regex=False),
+                errors="coerce",
+            )
+        )
+
+    fcl = ler_tabela_numerica("FCL.csv")
+    capex_expansao = ler_tabela_numerica("Capex_Expancao.csv")
+    fcl_futuro_projetado = ler_tabela_numerica("FCL_futuro_projetado.csv")
+    proventos_anuais = ler_tabela_numerica("proventos.csv")
+
+    for tabela in (fcl, capex_expansao, proventos_anuais):
+        tabela.index = tabela.index.str.strip()
 
     fcl.columns = fcl.columns.str.strip()
     capex_expansao.columns = capex_expansao.columns.str.strip()
@@ -235,6 +292,17 @@ def preparar_dados_fcl(fcl, capex_expansao, inpc_anual, usar_capex, diretorio_sa
     return fcl, fatores_correcao_inpc, ano_base_fcl, fcl_corrigido
 
 
+def mascarar_fcl_antes_do_primeiro_valor(fcl_por_ano):
+    """Troca por NaN os valores anteriores ao primeiro FCL diferente de zero.
+
+    Aceita Series ou DataFrame (anos nas linhas). Zeros posteriores ao primeiro
+    valor não nulo continuam como dados. Séries inteiramente nulas ficam intactas.
+    """
+    nao_nulo = fcl_por_ano.ne(0) & fcl_por_ano.notna()
+    ja_iniciou = nao_nulo.astype(int).cummax().astype(bool) | ~nao_nulo.any()
+    return fcl_por_ano.where(ja_iniciou)
+
+
 def ajustar_modelo_multivariado(dados_fcl, usar_correlacao):
     """Ajusta o modelo bayesiano conjunto aos FCLs das empresas.
 
@@ -244,13 +312,14 @@ def ajustar_modelo_multivariado(dados_fcl, usar_correlacao):
     """
     anos = dados_fcl.index.astype(float).to_numpy()
     fcl_observado = dados_fcl.to_numpy(dtype=float)
+    mascara_observado = ~np.isnan(fcl_observado)
     anos_padronizados = (anos - anos.mean()) / anos.std()
     numero_empresas = dados_fcl.shape[1]
 
     with pm.Model() as modelo:
         alpha = pm.Normal(
             "alpha",
-            mu=fcl_observado.mean(axis=0),
+            mu=np.nanmean(fcl_observado, axis=0),
             sigma=10,
             shape=numero_empresas,
         )
@@ -281,12 +350,24 @@ def ajustar_modelo_multivariado(dados_fcl, usar_correlacao):
             alpha[None, :]
             + beta[None, :] * anos_padronizados[:, None]
         )
-        pm.MvNormal(
-            "FCL_observado",
-            mu=media_fcl,
-            chol=chol,
-            observed=fcl_observado,
-        )
+        covariancia = chol @ chol.T
+        # Cada padrão de dados faltantes (anos antes do primeiro FCL não nulo)
+        # usa a marginal da normal multivariada sobre as empresas observadas.
+        padroes = {}
+        for indice_ano, padrao in enumerate(mascara_observado):
+            padroes.setdefault(tuple(padrao), []).append(indice_ano)
+        for numero_padrao, (padrao, linhas) in enumerate(padroes.items()):
+            colunas = np.flatnonzero(padrao)
+            if colunas.size == 0:
+                continue
+            marginal = pm.MvNormal.dist(
+                mu=media_fcl[linhas][:, colunas],
+                cov=covariancia[colunas][:, colunas],
+            )
+            pm.Potential(
+                f"FCL_observado_{numero_padrao}",
+                pm.logp(marginal, fcl_observado[np.ix_(linhas, colunas)]),
+            )
         idata = pm.sample(
             draws=1000,
             tune=1000,
@@ -698,6 +779,389 @@ def dividendos_anuais_carteira(
     return tabela
 
 
+def lucro_medio_portfolio(quantidades, dividendos_medios):
+    """Dividendo médio esperado do portfólio: soma de quantidade × dividendo médio.
+
+    `quantidades` são as ações de cada ativo e `dividendos_medios` o dividendo
+    médio por ação (mesma ordem e mesmo período). O resultado está na unidade
+    do dividendo médio (por exemplo, R$ no ano).
+    """
+    quantidades = np.asarray(quantidades, dtype=float)
+    dividendos_medios = np.asarray(dividendos_medios, dtype=float)
+    if quantidades.shape != dividendos_medios.shape or quantidades.ndim != 1:
+        raise ValueError("quantidades e dividendos_medios devem ser vetores do mesmo tamanho.")
+    return float(quantidades @ dividendos_medios)
+
+
+def variancia_portfolio(quantidades, covariancia):
+    """Variância do dividendo do portfólio: q' Σ q.
+
+    `covariancia` é a matriz de covariância dos dividendos por ação dos ativos
+    (mesma ordem de `quantidades`), em unidade². O resultado está em unidade²;
+    o desvio padrão do portfólio é a raiz quadrada dele.
+    """
+    quantidades = np.asarray(quantidades, dtype=float)
+    covariancia = np.asarray(covariancia, dtype=float)
+    numero_ativos = quantidades.size
+    if quantidades.ndim != 1 or covariancia.shape != (numero_ativos, numero_ativos):
+        raise ValueError("covariancia deve ser uma matriz quadrada com um lado por ativo.")
+    return float(quantidades @ covariancia @ quantidades)
+
+
+def resumo_portfolio_por_ano(
+    anos_dividendos,
+    dividendos_amostras,
+    fcl_amostras,
+    covariancia_fcl,
+    empresas,
+    quantidades,
+    carteira,
+    ano_base,
+    fonte_covariancia,
+):
+    """Dividendo médio e risco da carteira por ano (R$), com a covariância escolhida.
+
+    fonte_covariancia = "DIVIDENDOS": Σ é a covariância, entre os draws, dos
+    dividendos por ação de cada ano. "FCL": Σ é `covariancia_fcl` (R$ bi²)
+    convertida para dividendo por ação com o payout efetivo do ano
+    (dividendo médio ÷ FCL médio positivo), isto é, Σ_div = D Σ_FCL D.
+    A média sempre vem dos dividendos simulados.
+    """
+    fonte = str(fonte_covariancia).upper()
+    if fonte not in ("FCL", "DIVIDENDOS"):
+        raise ValueError('COR_FCL_ou_DIVIDENDOS deve ser "FCL" ou "DIVIDENDOS".')
+
+    posicao = carteira.set_index("ativo")["quantidade"]
+    anos = np.asarray(anos_dividendos)
+    indices_ativos = []
+    for i, empresa in enumerate(empresas):
+        ativo = empresa.replace(".SA", "")
+        if ativo in posicao.index and not np.isnan(dividendos_amostras[:, :, i]).all():
+            indices_ativos.append(i)
+    if not indices_ativos:
+        raise ValueError("Nenhum ativo da carteira tem dividendos simulados.")
+
+    q = np.array([float(posicao[empresas[i].replace(".SA", "")]) for i in indices_ativos])
+    acoes_bi = np.array([quantidades[empresas[i]] / 1e9 for i in indices_ativos])
+    por_acao = dividendos_amostras[:, :, indices_ativos] / acoes_bi
+    sigma_fcl = np.asarray(covariancia_fcl, dtype=float)[np.ix_(indices_ativos, indices_ativos)]
+
+    linhas = {}
+    for indice_ano in np.where(anos >= ano_base)[0]:
+        draws = por_acao[:, indice_ano, :]
+        media = np.nanmean(draws, axis=0)
+        total_draws = np.nansum(draws * q, axis=1)
+        if fonte == "DIVIDENDOS":
+            covariancia = np.atleast_2d(np.cov(draws, rowvar=False))
+        else:
+            fcl_medio = np.clip(fcl_amostras[:, indice_ano, indices_ativos], 0, None).mean(axis=0)
+            dividendo_medio = np.nanmean(dividendos_amostras[:, indice_ano, indices_ativos], axis=0)
+            payout = np.divide(
+                dividendo_medio, fcl_medio, out=np.zeros_like(fcl_medio), where=fcl_medio > 0
+            )
+            escala = payout / acoes_bi
+            covariancia = escala[:, None] * sigma_fcl * escala[None, :]
+        variancia = variancia_portfolio(q, covariancia)
+        linhas[int(anos[indice_ano])] = {
+            "dividendo_medio_rs": lucro_medio_portfolio(q, media),
+            "variancia_rs2": variancia,
+            "desvio_padrao_rs": float(np.sqrt(variancia)),
+            "dividendo_mediano_rs": float(np.median(total_draws)),
+            "p10_rs": float(np.percentile(total_draws, 10)),
+            "p90_rs": float(np.percentile(total_draws, 90)),
+        }
+    resumo = pd.DataFrame(linhas).T
+    resumo.index.name = "ano"
+    return resumo
+
+
+def resumo_vp_portfolio(vp_amostras, empresas, quantidades, carteira):
+    """Valor presente (R$) dos dividendos futuros da carteira: média, mediana, P10, P90, variância.
+
+    `vp_amostras` (draws, empresas) vem de `calcular_vp_amostras`. Cada draw é
+    somado entre os ativos antes dos percentis, preservando a correlação.
+    A variância é q' Σ q, com Σ a covariância do VP por ação entre draws.
+    """
+    posicao = carteira.set_index("ativo")["quantidade"]
+    indices = [
+        i for i, e in enumerate(empresas)
+        if e.replace(".SA", "") in posicao.index and not np.isnan(vp_amostras[:, i]).all()
+    ]
+    if not indices:
+        raise ValueError("Nenhum ativo da carteira tem valor presente simulado.")
+    q = np.array([float(posicao[empresas[i].replace(".SA", "")]) for i in indices])
+    acoes_bi = np.array([quantidades[empresas[i]] / 1e9 for i in indices])
+    por_acao = vp_amostras[:, indices] / acoes_bi
+    total = por_acao @ q
+    variancia = variancia_portfolio(q, np.atleast_2d(np.cov(por_acao, rowvar=False)))
+    return pd.Series(
+        {
+            "vp_medio_rs": lucro_medio_portfolio(q, por_acao.mean(axis=0)),
+            "vp_mediana_rs": float(np.median(total)),
+            "vp_p10_rs": float(np.percentile(total, 10)),
+            "vp_p90_rs": float(np.percentile(total, 90)),
+            "variancia_rs2": variancia,
+            "desvio_padrao_rs": float(np.sqrt(variancia)),
+        }
+    )
+
+
+def plotar_risco_retorno_portfolio(
+    vp_amostras, empresas, quantidades, cotacoes, carteira, caminho_saida,
+    numero_carteiras=None, semente=0, eixo_x="desvio",
+    limite_x=None, limite_lucro_mil=None, minimo_x=0, minimo_lucro_mil=0,
+    fracao_outliers=0.05, variancia_alvo=None,
+):
+    """Volatilidade × lucro esperado (VP dos dividendos futuros, R$ mil) e sua carteira.
+
+    Lucro esperado = mediana do VP da carteira; volatilidade = desvio padrão
+    √(q'Σq). A nuvem são carteiras aleatórias com o mesmo capital investido
+    (mesma soma quantidade × cotação) e pesos sorteados entre os ativos do
+    modelo; a linha é a fronteira ótima (máxima mediana para cada risco, sem venda a descoberto).
+    O envelope é o casco convexo da nuvem sem a fração `fracao_outliers` de pontos mais
+    distantes (Mahalanobis).
+    Carteiras sobre o envelope (retornadas em "carteiras_envelope", com pesos): a de menor
+    volatilidade e a de maior lucro com volatilidade ≈ `variancia_alvo` (padrão
+    VARIANCIA_ALVO_ENVELOPE, R$ mil). Ambas são carteiras sorteadas reais da nuvem sem outliers.
+    `eixo_x` = "desvio" (desvio padrão, R$ mil) ou "variancia" (R$ milhões²).
+    `limite_x` e `limite_lucro_mil` cortam os eixos (x na unidade do eixo, lucro
+    em R$ mil); "dobro" em `limite_x` usa o dobro do valor da sua carteira.
+    """
+    if numero_carteiras is None:
+        numero_carteiras = NUMERO_CARTEIRAS_ALEATORIAS
+    if variancia_alvo is None:
+        variancia_alvo = VARIANCIA_ALVO_ENVELOPE
+    if eixo_x not in ("desvio", "variancia"):
+        raise ValueError('eixo_x deve ser "desvio" ou "variancia".')
+    posicao = carteira.set_index("ativo")["quantidade"]
+    indices = [
+        i for i, e in enumerate(empresas)
+        if e.replace(".SA", "") in posicao.index
+        and np.isfinite(cotacoes.get(e, np.nan))
+        and np.isfinite(vp_amostras[:, i]).all()
+    ]
+    if len(indices) < 2:
+        raise ValueError("São necessários ao menos 2 ativos com VP e cotação válidos.")
+    nomes = [empresas[i].replace(".SA", "") for i in indices]
+    acoes_bi = np.array([quantidades[empresas[i]] / 1e9 for i in indices])
+    preco = np.array([cotacoes[empresas[i]] for i in indices], dtype=float)
+    por_acao = vp_amostras[:, indices] / acoes_bi
+    covariancia = np.cov(por_acao, rowvar=False)
+
+    q_atual = np.array([float(posicao[n]) for n in nomes])
+    capital = float(q_atual @ preco)
+
+    def metricas(matriz_q):
+        desvio = np.sqrt(np.einsum("ij,jk,ik->i", matriz_q, covariancia, matriz_q))
+        mediana = np.concatenate([
+            np.median(por_acao @ bloco.T, axis=0)
+            for bloco in np.array_split(matriz_q, max(1, len(matriz_q) // 500))
+        ])
+        return desvio / 1000, mediana / 1000
+
+    def para_eixo(desvio_mil):
+        return desvio_mil**2 / 1e6 if eixo_x == "variancia" else desvio_mil
+
+    aleatorio = np.random.default_rng(semente)
+    pesos = aleatorio.dirichlet(np.ones(len(indices)), size=numero_carteiras)
+    x_desvio, y = metricas(pesos * capital / preco)
+    x = para_eixo(x_desvio)
+    x_atual_desvio, y_atual = (v[0] for v in metricas(q_atual[None, :]))
+    x_atual = para_eixo(x_atual_desvio)
+
+    # Seleção sobre o envelope (feita sempre em desvio padrão, para ser a mesma nos dois gráficos)
+    nuvem_desvio = np.column_stack([x_desvio, y])
+    dif = nuvem_desvio - nuvem_desvio.mean(axis=0)
+    dist = np.einsum("ij,jk,ik->i", dif, np.linalg.pinv(np.cov(nuvem_desvio, rowvar=False)), dif)
+    dentro = np.where(dist <= np.quantile(dist, 1 - fracao_outliers))[0]
+    vertices = dentro[ConvexHull(nuvem_desvio[dentro]).vertices]
+    i_menor = int(vertices[np.argmin(x_desvio[vertices])])
+    tolerancia = 0.05 * variancia_alvo
+    faixa = dentro[np.abs(x_desvio[dentro] - variancia_alvo) <= tolerancia]
+    while faixa.size == 0 and tolerancia < x_desvio.max():
+        tolerancia *= 2
+        faixa = dentro[np.abs(x_desvio[dentro] - variancia_alvo) <= tolerancia]
+    if faixa.size == 0:
+        raise ValueError("Nenhuma carteira sorteada perto da volatilidade alvo.")
+    i_maior = int(faixa[np.argmax(y[faixa])])
+
+    def tabela_carteira(i):
+        q = pesos[i] * capital / preco
+        return pd.DataFrame(
+            {
+                "peso_pct": pesos[i] * 100,
+                "valor_rs": pesos[i] * capital,
+                "quantidade_acoes": q,
+                "quantidade_atual": q_atual,
+            },
+            index=pd.Index(nomes, name="ativo"),
+        ).sort_values("peso_pct", ascending=False)
+
+    carteiras_envelope = {
+        "menor_volatilidade": {
+            "tabela": tabela_carteira(i_menor),
+            "volatilidade_mil": float(x_desvio[i_menor]),
+            "lucro_mediano_mil": float(y[i_menor]),
+        },
+        "maior_lucro": {
+            "tabela": tabela_carteira(i_maior),
+            "volatilidade_mil": float(x_desvio[i_maior]),
+            "lucro_mediano_mil": float(y[i_maior]),
+        },
+    }
+
+    # Fronteira ótima: para cada nível de risco, maximiza a mediana do VP com
+    # orçamento fixo e sem venda a descoberto. Parte da solução média-variância
+    # (problema suave) e refina para a mediana.
+    quantidade_por_peso = capital / preco
+    media_por_acao = por_acao.mean(axis=0)
+    orcamento = {"type": "eq", "fun": lambda w: w.sum() - 1}
+    limites = [(0, 1)] * len(indices)
+
+    def variancia_pesos(w):
+        q = w * quantidade_por_peso
+        return q @ covariancia @ q
+
+    def mediana_pesos(w):
+        return np.median(por_acao @ (w * quantidade_por_peso))
+
+    w_min = minimize(variancia_pesos, np.full(len(indices), 1 / len(indices)),
+                     bounds=limites, constraints=[orcamento], method="SLSQP").x
+    w_max = np.zeros(len(indices))
+    w_max[np.argmax(media_por_acao * quantidade_por_peso)] = 1.0
+    var_min, var_max = variancia_pesos(w_min), variancia_pesos(w_max)
+
+    pontos = [(var_min, mediana_pesos(w_min))]
+    w_inicial = w_min
+    for nivel_variancia in np.linspace(var_min, var_max, 30)[1:]:
+        limite_risco = {"type": "ineq", "fun": lambda w, v=nivel_variancia: v - variancia_pesos(w)}
+        restricoes = [orcamento, limite_risco]
+        w_media = minimize(lambda w: -(w * quantidade_por_peso) @ media_por_acao, w_inicial,
+                           bounds=limites, constraints=restricoes, method="SLSQP").x
+        w_otimo = minimize(lambda w: -mediana_pesos(w), w_media,
+                           bounds=limites, constraints=restricoes, method="SLSQP").x
+        candidatos = [w_media, w_otimo]
+        w_inicial = max(candidatos, key=mediana_pesos)
+        pontos.append((variancia_pesos(w_inicial), mediana_pesos(w_inicial)))
+    pontos = np.array(pontos)
+    pontos = pontos[np.argsort(pontos[:, 0])]
+    pontos[:, 1] = np.maximum.accumulate(pontos[:, 1])
+    # Corta a cauda plana: mais risco sem mais lucro não pertence à fronteira
+    ultimo = int(np.argmax(pontos[:, 1] >= pontos[:, 1].max() * 0.9995))
+    pontos = pontos[: ultimo + 1]
+    fronteira_x = np.sqrt(pontos[:, 0]) / 1000
+    if eixo_x == "variancia":
+        fronteira_x = fronteira_x**2 / 1e6
+    fronteira_y = pontos[:, 1] / 1000
+
+    figura, eixo = plt.subplots(figsize=(10, 7))
+    eixo.scatter(x, y, s=8, alpha=0.3, color="tab:gray", label="Carteiras aleatórias (mesmo capital)")
+    # Envelope: casco convexo da nuvem sem os outliers (maior distância de Mahalanobis)
+    nuvem = np.column_stack([x, y])
+    centro = nuvem.mean(axis=0)
+    diferenca = nuvem - centro
+    distancia = np.einsum(
+        "ij,jk,ik->i", diferenca, np.linalg.pinv(np.cov(nuvem, rowvar=False)), diferenca
+    )
+    interior = nuvem[distancia <= np.quantile(distancia, 1 - fracao_outliers)]
+    casco = interior[ConvexHull(interior).vertices]
+    eixo.fill(casco[:, 0], casco[:, 1], facecolor="tab:orange", alpha=0.12,
+              edgecolor="tab:orange", linewidth=1.5, label="Envelope das carteiras")
+    eixo.plot(fronteira_x, fronteira_y, color="tab:blue", linewidth=2, label="Fronteira ótima")
+    eixo.scatter(x_atual, y_atual, s=180, marker="*", color="tab:red", zorder=5,
+                 edgecolor="black", label="Sua carteira")
+    eixo.scatter(x[i_menor], y[i_menor], s=90, marker="D", color="tab:green", zorder=5,
+                 edgecolor="black", label="Envelope: menor volatilidade")
+    eixo.scatter(x[i_maior], y[i_maior], s=90, marker="s", color="tab:purple", zorder=5,
+                 edgecolor="black", label="Envelope: maior lucro (volatilidade alvo)")
+    eixo.axvline(para_eixo(variancia_alvo), color="tab:purple", linestyle=":", linewidth=1)
+    eixo.set_xlabel(
+        "Variância do VP (R$ milhões²)" if eixo_x == "variancia"
+        else "Volatilidade: desvio padrão do VP (R$ mil)"
+    )
+    eixo.set_ylabel("Lucro esperado: mediana do VP dos dividendos (R$ mil)")
+    eixo.set_title(
+        f"{'Variância' if eixo_x == 'variancia' else 'Volatilidade'} × lucro esperado da carteira"
+    )
+    if limite_x == "dobro":
+        limite_x = 2 * x_atual
+    if limite_x is not None:
+        eixo.set_xlim(minimo_x, limite_x)
+    if limite_lucro_mil is not None:
+        eixo.set_ylim(minimo_lucro_mil, limite_lucro_mil)
+    eixo.grid(alpha=0.3)
+    eixo.legend(loc="lower right")
+    figura.tight_layout()
+    figura.savefig(caminho_saida, dpi=200)
+    plt.close(figura)
+    return {
+        "x_atual": float(x_atual),
+        "lucro_mediano_mil": float(y_atual),
+        "carteiras_envelope": carteiras_envelope,
+    }
+
+
+def plotar_pizza_carteira_selecionada(tabela, titulo, caminho_saida):
+    """Pizza da composição (% do capital) de uma carteira selecionada."""
+    pesos = tabela.loc[tabela["peso_pct"] >= 0.05, "peso_pct"]
+    figura, eixo = plt.subplots(figsize=(9, 9))
+    eixo.pie(
+        pesos,
+        labels=pesos.index,
+        autopct="%1.1f%%",
+        colors=plt.cm.tab20.colors[: len(pesos)],
+        startangle=90,
+        counterclock=False,
+        pctdistance=0.8,
+        wedgeprops={"edgecolor": "white"},
+    )
+    eixo.set_title(titulo)
+    figura.savefig(caminho_saida, dpi=150, bbox_inches="tight")
+    plt.close(figura)
+
+
+def dividendos_historicos_carteira(dividendos_historicos, empresas, quantidades, carteira):
+    """Dividendos passados da carteira (R$) por ano: dividendo por ação × sua quantidade."""
+    posicao = carteira.set_index("ativo")["quantidade"]
+    total = None
+    for empresa in empresas:
+        ativo = empresa.replace(".SA", "")
+        if ativo not in posicao.index or empresa not in dividendos_historicos.index:
+            continue
+        serie = dividendos_historicos.loc[empresa]
+        if serie.isna().all():
+            continue
+        valor = serie.fillna(0) / (quantidades[empresa] / 1e9) * float(posicao[ativo])
+        total = valor if total is None else total.add(valor, fill_value=0)
+    return total
+
+
+def plotar_risco_portfolio(resumo, historico, caminho_saida):
+    """Dividendos da carteira (R$ mil): histórico, mediana futura e faixa P10–P90."""
+    figura, eixo = plt.subplots(figsize=(12, 6))
+    anos = resumo.index.astype(int)
+    if historico is not None:
+        eixo.plot(
+            historico.index.astype(int), historico / 1000, color="black",
+            marker="o", linewidth=2, label="Histórico",
+        )
+    eixo.plot(anos, resumo["dividendo_mediano_rs"] / 1000, color="tab:blue",
+              marker="o", linewidth=2, label="Mediana prevista")
+    eixo.plot(anos, resumo["p10_rs"] / 1000, color="tab:red", linestyle="--", label="P10")
+    eixo.plot(anos, resumo["p90_rs"] / 1000, color="tab:green", linestyle="--", label="P90")
+    eixo.fill_between(anos, resumo["p10_rs"] / 1000, resumo["p90_rs"] / 1000,
+                      color="tab:blue", alpha=0.15)
+    eixo.set_ylim(bottom=0)
+    eixo.set_xlabel("Ano")
+    eixo.set_ylabel("Dividendos (R$ mil, preços de 2025)")
+    eixo.set_title("Dividendos da carteira: histórico, mediana prevista e P10–P90")
+    eixo.grid(alpha=0.3)
+    eixo.legend(loc="upper left")
+    figura.tight_layout()
+    figura.savefig(caminho_saida, dpi=200)
+    plt.close(figura)
+
+
 def plotar_tabela_dividendos_carteira(tabela, caminho_saida):
     """Salva uma figura com a tabela de dividendos por ativo e ano (R$ mil)."""
     texto = (tabela / 1000).map("{:,.1f}".format)
@@ -773,6 +1237,10 @@ def plotar_distribuicao_vp(
         if not np.isfinite(cotacao) or np.all(amostras == 0):
             continue
         razao = amostras / (quantidades_por_empresa[empresa] / 1e9) / cotacao
+        razao = razao[np.isfinite(razao)]
+        if razao.size < 2 or np.ptp(razao) == 0:
+            print(f"Aviso: {empresa} sem VP válido (quantidade de ações ou dividendos ausentes); ignorado no gráfico.")
+            continue
         linhas.append((empresa.replace(".SA", ""), razao))
 
     x_max = max(np.percentile(razao, 97) for _, razao in linhas) * 1.05
@@ -895,6 +1363,73 @@ def plotar_tabela_valor_presente(valor_presente, caminho_saida):
     plt.close(figura)
 
 
+# def plotar_dividendos(
+#     relatorio,
+#     dividendos_historicos,
+#     empresas,
+#     ano_inicial,
+#     ano_final,
+#     ultimo_ano_observado,
+#     ano_base_fcl,
+#     modo,
+#     caminho_saida,
+# ):
+#     """Desenha observações históricas e a preditiva de dividendos P10/P50/P90."""
+
+# linhas_grade = int(np.ceil(len(empresas) / 2))
+# if not USAR_EMPRESAS_MUTLIVARIADAS:
+
+#     figura_final, eixos_finais = plt.subplots(
+#             len(empresas), 1, figsize=(20, 5 * len(empresas)), squeeze=False
+#     )
+
+    
+#     #figsize=(20, 5 * numero_empresas),
+#      #   squeeze=False,
+
+#     for indice_empresa, empresa in enumerate(empresas):
+#         eixo = eixos.flat[indice_empresa]
+#         tabela = relatorio[relatorio["ticker"] == empresa]
+#         if tabela.empty:
+#             eixo.set_axis_off()
+#             continue
+
+#         historico = dividendos_historicos.loc[empresa].dropna()
+#         eixo.scatter(
+#             historico.index, historico.to_numpy(), color="black",
+#             label="Dividendo observado",
+#         )
+#         eixo.plot(
+#             tabela["ano"], tabela["dividendo_p50_rs_bi"], color="blue",
+#             label="Dividendo mediano",
+#         )
+#         eixo.plot(
+#             tabela["ano"], tabela["dividendo_p90_rs_bi"], color="green",
+#             linestyle="--", label="Dividendo P90",
+#         )
+#         eixo.plot(
+#             tabela["ano"], tabela["dividendo_p10_rs_bi"], color="red",
+#             linestyle="--", label="Dividendo P10",
+#         )
+#         eixo.axvline(ultimo_ano_observado + 0.5, color="gray", linestyle=":")
+#         eixo.set_xlim(ano_inicial - 0.5, ano_final + 0.5)
+#         eixo.set_xticks(range(ano_inicial, ano_final + 1, 2))
+#         eixo.set_title(f"{empresa} - dividendos até {ano_final}")
+#         eixo.set_xlabel("Ano")
+#         eixo.set_ylabel(f"R$ bi (preços de {ano_base_fcl})")
+#         eixo.grid(alpha=0.3)
+#         eixo.legend(fontsize=8, framealpha=0.6)
+
+#     for eixo_vazio in eixos.flat[len(empresas):]:
+#         eixo_vazio.set_axis_off()
+#     figura_final.suptitle(
+#         f"Dividendos totais: observados e P10/mediana/P90 do modelo, "
+#         f"{ano_inicial}-{ano_final} (payout {modo} do FCL)"
+#     )
+#     figura_final.tight_layout()
+#     figura_final.savefig(caminho_saida, dpi=200)
+#     plt.close(figura_final)
+
 def plotar_dividendos(
     relatorio,
     dividendos_historicos,
@@ -907,9 +1442,12 @@ def plotar_dividendos(
     caminho_saida,
 ):
     """Desenha observações históricas e a preditiva de dividendos P10/P50/P90."""
-    linhas_grade = int(np.ceil(len(empresas) / 2))
+    numero_empresas = len(empresas)
     figura, eixos = plt.subplots(
-        linhas_grade, 2, figsize=(14, 4 * linhas_grade), squeeze=False
+        numero_empresas,
+        1,
+        figsize=(7, 4 * numero_empresas),
+        squeeze=False,
     )
     for indice_empresa, empresa in enumerate(empresas):
         eixo = eixos.flat[indice_empresa]
@@ -936,22 +1474,22 @@ def plotar_dividendos(
             linestyle="--", label="Dividendo P10",
         )
         eixo.axvline(ultimo_ano_observado + 0.5, color="gray", linestyle=":")
-        eixo.set_xlim(ano_inicial - 0.5, ano_final + 0.5)
-        eixo.set_xticks(range(ano_inicial, ano_final + 1, 2))
-        eixo.set_title(f"{empresa} - dividendos até {ano_final}")
+        eixo.set_xlim(ano_inicial, ano_final)
+        eixo.set_title(f"{empresa} - dividendos até {ano_final}", fontsize=12)
         eixo.set_xlabel("Ano")
         eixo.set_ylabel(f"R$ bi (preços de {ano_base_fcl})")
         eixo.grid(alpha=0.3)
-        eixo.legend(fontsize=8, framealpha=0.6)
+        eixo.legend(fontsize=8)
 
     for eixo_vazio in eixos.flat[len(empresas):]:
         eixo_vazio.set_axis_off()
     figura.suptitle(
         f"Dividendos totais: observados e P10/mediana/P90 do modelo, "
-        f"{ano_inicial}-{ano_final} (payout {modo} do FCL)"
+        f"{ano_inicial}-{ano_final} (payout {modo} do FCL)",
+        fontsize=12,
     )
-    figura.tight_layout()
-    figura.savefig(caminho_saida, dpi=200)
+    figura.tight_layout(rect=(0, 0, 1, 0.96))
+    figura.savefig(caminho_saida, dpi=200, bbox_inches="tight")
     plt.close(figura)
 
 
@@ -1050,8 +1588,12 @@ def construir_modelo_bayesiano(ticker, eixos):
     Retorna o modelo PyMC, os resultados posteriores e os resumos preditivos.
     """
     anos = np.asarray(fcl_utilizado.columns, dtype=float)
-    fluxo_caixa = fcl_utilizado.loc[ticker].astype(float).to_numpy()
-    anos_padronizados = (anos - anos.mean()) / anos.std()
+    fluxo_caixa = mascarar_fcl_antes_do_primeiro_valor(
+        fcl_utilizado.loc[ticker].astype(float)
+    ).to_numpy()
+    valido = ~np.isnan(fluxo_caixa)
+    anos_padronizados = ((anos - anos.mean()) / anos.std())[valido]
+    fluxo_caixa = fluxo_caixa[valido]
 
     with pm.Model() as modelo:
         alpha = pm.Normal("alpha", mu=fluxo_caixa.mean(), sigma=10 * fluxo_caixa.std())
@@ -1137,7 +1679,7 @@ def construir_modelo_bayesiano(ticker, eixos):
     ]
 
     eixo_fcl = eixos[0]
-    eixo_fcl.scatter(anos, fluxo_caixa, color="black", label="FCL observado")
+    eixo_fcl.scatter(anos[valido], fluxo_caixa, color="black", label="FCL observado")
     eixo_fcl.plot(anos_projecao, fcl_medio, color="blue", label="FCL médio")
     eixo_fcl.plot(anos_projecao, fcl_p90, color="green", linestyle="--", label="FCL P90")
     eixo_fcl.plot(anos_projecao, fcl_p10, color="red", linestyle="--", label="FCL P10")
@@ -1194,14 +1736,20 @@ if not USAR_EMPRESAS_MUTLIVARIADAS:
     plt.close(figura_final)
     print(f"Figura única salva em: {plot_name}")
 
+################################################################################
 
-################################################################################333
+################################################################################
+
+
+################################################################################33
 #
 # Modelo bayesiano multivariado para as três empresas
 
 
 # Matriz: linhas = anos; colunas = empresas
-dados_fcl = fcl_utilizado.loc[empresas_multivariadas].T
+dados_fcl = mascarar_fcl_antes_do_primeiro_valor(
+    fcl_utilizado.loc[empresas_multivariadas].T
+)
 numero_empresas = len(empresas_multivariadas)
 (
     modelo_multivariado,
@@ -1212,7 +1760,6 @@ numero_empresas = len(empresas_multivariadas)
     dados_fcl=dados_fcl,
     usar_correlacao=USAR_EMPRESAS_MUTLIVARIADAS,
 )
-
 
 # Resumo dos parâmetros individuais
 resumo_parametros = az.summary(
@@ -1280,7 +1827,6 @@ print(
     )
 )
 
-
 # Matriz de covariância média posterior
 covariancia_media = covariancia_amostras.mean(axis=0)
 
@@ -1309,10 +1855,9 @@ pd.DataFrame(
     OUTPUT_DIR / "matriz_covariancia_posterior.csv"
 )
 
-
 # Gráfico da matriz de correlação posterior média
 figura_correlacao, eixo_correlacao = plt.subplots(
-    figsize=(7, 6)
+    figsize=(12, 4 * int(np.ceil(len(empresas) / 2)))
 )
 
 imagem = eixo_correlacao.imshow(
@@ -1339,7 +1884,8 @@ for linha in range(numero_empresas):
         )
 
 eixo_correlacao.set_title(
-    "Correlação posterior média entre os FCLs"
+    "Correlação posterior média entre os FCLs",
+    fontsize=12,
 )
 
 figura_correlacao.colorbar(
@@ -1348,11 +1894,12 @@ figura_correlacao.colorbar(
     label="Correlação",
 )
 
-figura_correlacao.tight_layout()
+figura_correlacao.tight_layout(rect=(0, 0, 1, 0.96))
 
 figura_correlacao.savefig(
     FIG_DIR / "matriz_correlacao_posterior.png",
     dpi=200,
+    bbox_inches="tight",
 )
 
 plt.close(figura_correlacao)
@@ -1449,15 +1996,16 @@ for indice_empresa, empresa in enumerate(empresas_multivariadas):
             label="FCL P10",
         )
         eixo.set_xlim(ano_inicial, ano_final_plot)
-        eixo.set_title(f"{empresa} - Modelo {nome_modelo.lower()}")
+        eixo.set_title(f"{empresa} - Modelo {nome_modelo.lower()}", fontsize=12)
         eixo.set_xlabel("Ano")
         eixo.set_ylabel("Fluxo de caixa livre")
-        eixo.legend()
+        eixo.legend(fontsize=8)
         eixo.grid(alpha=0.3)
 
 figura_fcl.suptitle(
     "Projeções de FCL: "
-    + ("modelo multivariado" if USAR_EMPRESAS_MUTLIVARIADAS else "modelos individual e independente")
+    + ("modelo multivariado" if USAR_EMPRESAS_MUTLIVARIADAS else "modelos individual e independente"),
+    fontsize=12,
 )
 figura_fcl.tight_layout(rect=(0, 0, 1, 0.96))
 nome_arquivo_fcl = (
@@ -1542,8 +2090,8 @@ for indice_empresa, empresa in enumerate(empresas_multivariadas):
                     alpha_amostras[indice_empresa].max(),
                     500,
                 ),
-                fcl_observado[:, indice_empresa].mean(),
-                10 * fcl_observado[:, indice_empresa].std(),
+                np.nanmean(fcl_observado[:, indice_empresa]),
+                10 * np.nanstd(fcl_observado[:, indice_empresa]),
             ),
         ),
         (
@@ -1636,6 +2184,7 @@ if USAR_PAYOUT_BAYESIANO:
 
     for indice_empresa, empresa in enumerate(empresas):
         eixo = eixos_payout.flat[indice_empresa]
+        eixo.set_xlim(0, 120)
         observacoes_payout = (
             payout_anual_percentual.loc[empresa]
             .replace([np.inf, -np.inf], np.nan)
@@ -1773,10 +2322,10 @@ if USAR_PAYOUT_BAYESIANO:
                 linewidth=1.8,
                 label=f"{percentil}: {valor:.2f}%",
             )
-        eixo.set_title(f"{empresa} - payout mediano posterior")
+        eixo.set_title(f"{empresa} - payout mediano posterior", fontsize=12)
         eixo.set_xlabel("Payout (%)")
         eixo.set_ylabel("Densidade posterior")
-        eixo.legend()
+        eixo.legend(fontsize=8)
         eixo.grid(alpha=0.3)
 
         resumos_posteriores.append(
@@ -1809,7 +2358,7 @@ if USAR_PAYOUT_BAYESIANO:
         eixo_vazio.set_axis_off()
     figura_payout.suptitle(
         "Densidade posterior do payout mediano, 2016-2025",
-        fontsize=14,
+        fontsize=12,
     )
     figura_payout.tight_layout(rect=(0, 0, 1, 0.96))
     arquivo_densidade_payout = FIG_DIR / "payout_densidade_posterior.png"
@@ -1995,6 +2544,83 @@ if USAR_PAYOUT_BAYESIANO and parametros_payout_posterior:
     grafico_div_carteira = FIG_DIR / "dividendos_carteira_grafico.png"
     plotar_dividendos_carteira(dividendos_carteira, grafico_div_carteira)
     print(f"Gráfico dos dividendos da carteira salvo em: {grafico_div_carteira}")
+
+    resumo_portfolio = resumo_portfolio_por_ano(
+        anos_dividendos=anos_dividendos,
+        dividendos_amostras=dividendos_amostras,
+        fcl_amostras=previsoes_multivariadas[:, : len(anos_dividendos), :],
+        covariancia_fcl=covariancia_media,
+        empresas=empresas_multivariadas,
+        quantidades=quantidades_acoes,
+        carteira=carteira_planilha,
+        ano_base=ultimo_ano_observado,
+        fonte_covariancia=COR_FCL_ou_DIVIDENDOS,
+    )
+    arquivo_risco = OUTPUT_DIR / f"risco_portfolio_{COR_FCL_ou_DIVIDENDOS.lower()}.csv"
+    resumo_portfolio.to_csv(arquivo_risco, sep=";", decimal=",", float_format="%.2f")
+    print(f"\nDividendo médio e risco da carteira (covariância de {COR_FCL_ou_DIVIDENDOS}, R$):")
+    print(resumo_portfolio.round(0).to_string())
+    print(f"Risco da carteira salvo em: {arquivo_risco}")
+    figura_risco = FIG_DIR / f"risco_portfolio_{COR_FCL_ou_DIVIDENDOS.lower()}.png"
+    plotar_risco_portfolio(
+        resumo_portfolio,
+        dividendos_historicos_carteira(
+            dividendos_historicos, empresas_multivariadas, quantidades_acoes, carteira_planilha
+        ),
+        figura_risco,
+    )
+    print(f"Gráfico de risco da carteira salvo em: {figura_risco}")
+
+    resumo_vp = resumo_vp_portfolio(
+        vp_amostras, empresas_multivariadas, quantidades_acoes, carteira_planilha
+    )
+    arquivo_vp = OUTPUT_DIR / "vp_portfolio.csv"
+    resumo_vp.to_frame("valor").to_csv(arquivo_vp, sep=";", decimal=",", float_format="%.2f")
+    print(f"\nValor presente dos dividendos futuros da carteira (taxa real {TAXA:.0%}, R$):")
+    print(resumo_vp.round(0).to_string())
+    print(f"Valor presente da carteira salvo em: {arquivo_vp}")
+    figura_risco_retorno = FIG_DIR / "risco_retorno_portfolio.png"
+    ponto = plotar_risco_retorno_portfolio(
+        vp_amostras, empresas_multivariadas, quantidades_acoes, cotacoes,
+        carteira_planilha, figura_risco_retorno,
+        minimo_x=varianciaXlucro[0], limite_x=varianciaXlucro[1],
+        minimo_lucro_mil=varianciaXlucro[2] / 1000, limite_lucro_mil=varianciaXlucro[3] / 1000,
+    )
+    print(f"Sua carteira: desvio padrão R$ {ponto['x_atual']:.1f} mil, "
+          f"lucro mediano R$ {ponto['lucro_mediano_mil']:.1f} mil")
+    print(f"Gráfico volatilidade x lucro salvo em: {figura_risco_retorno}")
+    figura_variancia_retorno = FIG_DIR / "variancia_retorno_portfolio.png"
+    plotar_risco_retorno_portfolio(
+        vp_amostras, empresas_multivariadas, quantidades_acoes, cotacoes,
+        carteira_planilha, figura_variancia_retorno, eixo_x="variancia",
+        limite_x="dobro", limite_lucro_mil=1500,
+    )
+    print(f"Gráfico variância x lucro salvo em: {figura_variancia_retorno}")
+    titulos_envelope = {
+        "menor_volatilidade": "Carteira sobre o envelope de menor volatilidade",
+        "maior_lucro": (
+            "Carteira sobre o envelope de maior lucro "
+            f"(volatilidade ≈ R$ {VARIANCIA_ALVO_ENVELOPE:,.0f} mil)"
+        ),
+    }
+    for chave, carteira_sel in ponto["carteiras_envelope"].items():
+        arquivo_sel = OUTPUT_DIR / f"carteira_envelope_{chave}.csv"
+        carteira_sel["tabela"].to_csv(arquivo_sel, sep=";", decimal=",", float_format="%.2f")
+        print(f"\n{titulos_envelope[chave]} (mesmo capital, sem venda a descoberto):")
+        print(carteira_sel["tabela"].round(1).to_string())
+        print(
+            f"Volatilidade: R$ {carteira_sel['volatilidade_mil']:,.0f} mil; "
+            f"lucro mediano (VP): R$ {carteira_sel['lucro_mediano_mil']:,.0f} mil "
+            f"(sua carteira: R$ {ponto['x_atual']:,.0f} mil; R$ {ponto['lucro_mediano_mil']:,.0f} mil)"
+        )
+        figura_sel = FIG_DIR / f"carteira_envelope_{chave}_pizza.png"
+        plotar_pizza_carteira_selecionada(
+            carteira_sel["tabela"],
+            f"{titulos_envelope[chave]}\n(volatilidade R$ {carteira_sel['volatilidade_mil']:,.0f} mil; "
+            f"lucro mediano R$ {carteira_sel['lucro_mediano_mil']:,.0f} mil)",
+            figura_sel,
+        )
+        print(f"Tabela salva em: {arquivo_sel}\nPizza salva em: {figura_sel}")
     gerar_grafico_legacy(ano_final=ano_final_plot)
 
     figura_pizza = FIG_DIR / "carteira_pizza_modelo.png"

@@ -48,7 +48,7 @@ coverage.xml
 *.cover
 *.py,cover
 .hypothesis/
-.pytest_cache/
+.pytest_cache/l
 cover/
 
 # Translations
@@ -178,3 +178,10 @@ cython_debug/
 !/fig/FCL/
 /fig/FCL/*
 !/fig/FCL/.gitkeep
+
+#arquivos excluidos de serem enviados ao github
+*.xlsx
+*.xls
+*.xlsm
+*.html
+*.htm
